@@ -88,6 +88,10 @@ pub struct HostStatus {
     /// 被控端还没启动，菜单里不显示这一项
     #[serde(default)]
     pub prevent_sleep: Option<bool>,
+    /// 局域网直连正在监听的地址（`IP:端口`，见 `airhand_link::host::lan`）。`None`：没在监听（设置里关掉了、
+    /// 端口被占用、被控端还没启动）
+    #[serde(default)]
+    pub lan: Option<String>,
 }
 
 impl Default for HostStatus {
@@ -101,6 +105,7 @@ impl Default for HostStatus {
             paired: 0,
             lock_on_end: None,
             prevent_sleep: None,
+            lan: None,
         }
     }
 }

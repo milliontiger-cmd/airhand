@@ -494,6 +494,18 @@ pub(super) struct Direct {
     pub task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
 }
 
+impl Direct {
+    /// 局域网直连：本身就是唯一的路，没有服务器给的 observed 地址、也不打洞。`offers` 一直空着，
+    /// 任务永远不结束（会话结束时由 [`session::run`] 的 select 一起放弃）。
+    pub(super) fn none() -> Self {
+        let (offers_tx, _offers) = mpsc::channel(1);
+        Direct {
+            offers: offers_tx,
+            task: Box::pin(std::future::pending()),
+        }
+    }
+}
+
 /// 见 [`super::Frontend`]
 pub(super) enum Mode {
     Desktop {

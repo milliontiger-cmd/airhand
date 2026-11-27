@@ -13,10 +13,14 @@ export type View = "new" | "grid" | string;
 
 /** 新建连接标签里正在输入的内容（切到别的标签再回来时还在） */
 export interface Draft {
+  /** 连接方式：中转（控制码）还是局域网直连 */
+  mode: "code" | "lan";
   digits: string[];
   preset: PresetId;
   /** 配对码（对方要求配对时才显示这一栏，见 ConnectView） */
   pairing: string;
+  /** 局域网直连：对方监听的 IP、端口、账号、密码（连接时拼成 IP:端口） */
+  lan: { addr: string; port: string; account: string; password: string };
   busy: boolean;
   /** 保存类型而不是文字：切换语言后错误提示也跟着变 */
   error: Problem | null;
@@ -95,9 +99,11 @@ function saveLocal(key: string, value: string) {
 }
 
 export const emptyDraft = (): Draft => ({
+  mode: "code",
   digits: Array(6).fill(""),
   preset: DEFAULT_PRESET,
   pairing: "",
+  lan: { addr: "", port: "4900", account: "admin", password: "admin" },
   busy: false,
   error: null,
 });

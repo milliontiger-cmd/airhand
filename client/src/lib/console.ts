@@ -434,6 +434,30 @@ export class ConsoleLink {
     }
   }
 
+  async connectLan(
+    addr: string,
+    account: string,
+    password: string,
+    opts: ConnectOptions,
+    view: MediaView,
+    onEvent: (ev: SessionEvent) => void,
+    clipboard: boolean,
+  ): Promise<SessionInfo> {
+    const ch = this.nextCh++;
+    const chan: Chan = { sid: null, onEvent };
+    this.chans.set(ch, chan);
+    this.post({ t: "bind", ch, id: view.id });
+    try {
+      const info = await this.call<SessionInfo>("connectLan", { ...opts, addr, account, password, ch, clipboard });
+      chan.sid = info.sid;
+      if (this.chans.get(ch) === chan) this.post({ t: "sid", ch, sid: info.sid });
+      return info;
+    } catch (e) {
+      this.unbind(ch);
+      throw e;
+    }
+  }
+
   // ───────────────────────── 剪贴板里的文件（见 files.ts） ─────────────────────────
 
   async offerFiles(sid: number, files: LocalFiles): Promise<void> {

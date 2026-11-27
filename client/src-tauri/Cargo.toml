@@ -22,7 +22,7 @@ pkg-config = "0.3"
 airhand-proto = { path = "../../crates/airhand-proto" }
 # 与中转服务器的连接、控制端会话，控制台的 WebSocket 协议（与网页控制台共用）
 airhand-link = { path = "../../crates/airhand-link", features = ["console"] }
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri = { version = "2", features = ["tray-icon", "image-png", "custom-protocol"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }

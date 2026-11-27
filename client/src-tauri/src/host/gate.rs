@@ -116,6 +116,12 @@ impl Gate for DesktopGate {
     fn is_known(&self, key: &PublicKey) -> bool {
         self.pairing.is_known(key)
     }
+
+    fn lan_psk(&self, account: &str) -> Option<[u8; 32]> {
+        // 读"当前生效"的 LAN 配置（见 config::current_lan）：设置窗口改完账号/密码立即生效，
+        // 不再读进程启动时的快照。否则新旧参数都连不上，只能重启进程。
+        config::current_lan().psk_for(account)
+    }
 }
 
 #[cfg(test)]
@@ -153,6 +159,7 @@ mod tests {
             me: &me,
             host_key: None,
             pairing: Some(&code),
+            lan: None,
             intro: &intro,
         })
         .unwrap();

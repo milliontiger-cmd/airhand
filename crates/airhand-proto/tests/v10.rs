@@ -53,6 +53,7 @@ fn signal_and_handshake_layout() {
             pattern: Pattern::Known,
             pake: None,
             noise: vec![1, 2, 3],
+            lan_account: None,
         },
         "a200000243010203",
     );

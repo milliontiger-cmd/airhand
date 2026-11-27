@@ -1,5 +1,5 @@
 //! 无界面被控端（开发调试用）：`cargo run --example headless_host`
-use airhand_lib::host::{HostCode, HostService};
+use airhand_lib::host::{HostCode, HostService, LanSettings};
 use airhand_lib::status;
 
 #[tokio::main]
@@ -11,7 +11,8 @@ async fn main() {
     #[cfg(windows)]
     airhand_lib::host::capture::ignore_gpu_preference();
     let hub = status::new_hub();
-    let _host = HostService::start(hub.clone(), HostCode::default());
+    let (_lan, lan_rx) = tokio::sync::watch::channel(LanSettings::default());
+    let _host = HostService::start(hub.clone(), HostCode::default(), lan_rx);
     let mut rx = hub.subscribe();
     loop {
         let st = rx.borrow_and_update().clone();

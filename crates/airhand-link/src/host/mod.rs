@@ -22,6 +22,7 @@
 
 mod clock;
 mod cursor;
+pub mod lan;
 pub mod pairing;
 pub mod queue;
 pub mod session;
@@ -56,6 +57,7 @@ pub use pairing::{Paired, Pairing, PairingState, PairingStore};
 pub use queue::{Encoded, Outbox, SendError};
 pub use session::{
     Acks, Flows, MicSink, PEER_TIMEOUT, Platform, Request, Senders, Start, resolve_view, serve,
+    serve_lan,
 };
 pub use streams::{Admitted, ControllerReceiver, HostStreams, Writer};
 

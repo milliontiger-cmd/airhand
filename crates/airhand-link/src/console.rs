@@ -196,6 +196,18 @@ pub enum Call {
         #[serde(flatten)]
         opts: ConnectOptions,
     },
+    /// 局域网直连（见 [`crate::controller::ControllerService::connect_lan`]）：`addr` 是被控端监听的 `IP:端口`，
+    /// `account` / `password` 是账号密码（密码只在本地派生 PSK），加上 [`ConnectOptions`] 的字段（画质、声音等）
+    ConnectLan {
+        addr: String,
+        account: String,
+        password: String,
+        ch: u32,
+        #[serde(default)]
+        clipboard: bool,
+        #[serde(flatten)]
+        opts: ConnectOptions,
+    },
     /// 测量控制台到这里的往返时间
     Ping,
     /// 控制台这边复制了文件（用户选中的那几项）：公告给被控端（见模块说明的"剪贴板里的文件"）
@@ -668,6 +680,53 @@ impl Console {
                         _guard: guard,
                     });
                     let r = svc.connect(&code, opts, ui, frontend).await;
+                    out.reply(
+                        req.id,
+                        r.and_then(|info| serde_json::to_value(info).map_err(Problem::failed)),
+                    );
+                });
+                return;
+            }
+            Call::ConnectLan {
+                addr,
+                account,
+                password,
+                ch,
+                clipboard,
+                opts,
+            } => {
+                while self.tasks.try_join_next().is_some() {}
+                if self.tasks.len() >= MAX_CONNECTING {
+                    self.out
+                        .reply(req.id, Err(Problem::failed("too many pending connections")));
+                    return;
+                }
+                let addr = match addr.parse::<std::net::SocketAddr>() {
+                    Ok(a) => a,
+                    Err(e) => {
+                        self.out
+                            .reply(req.id, Err(Problem::failed(format!("invalid address: {e}"))));
+                        return;
+                    }
+                };
+                let frontend = match self.clipboard {
+                    Some(new) => Frontend::Desktop {
+                        clipboard: new(),
+                        sync: clipboard,
+                    },
+                    None => Frontend::Browser,
+                };
+                let (svc, out) = (self.svc.clone(), self.out.clone());
+                let guard = self.session.map(|new| new());
+                self.tasks.spawn(async move {
+                    let ui = Arc::new(ConsoleUi {
+                        ch,
+                        out: out.clone(),
+                        _guard: guard,
+                    });
+                    let r = svc
+                        .connect_lan(addr, &account, &password, opts, ui, frontend)
+                        .await;
                     out.reply(
                         req.id,
                         r.and_then(|info| serde_json::to_value(info).map_err(Problem::failed)),

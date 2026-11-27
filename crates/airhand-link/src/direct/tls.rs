@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use airhand_proto::DIRECT_ALPN;
+use airhand_proto::{DIRECT_ALPN, LAN_ALPN};
 use anyhow::{Context, Result, anyhow};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{ClientConfig, Connection, ServerConfig, TransportConfig, VarInt};
@@ -71,13 +71,18 @@ impl Cert {
 
 /// 被控端：接受控制端连过来的直连（放在连中转的那个 endpoint 上）。控制端必须出示证书，是谁握手之后按指纹认
 pub(crate) fn server_config(cert: &Cert) -> Result<ServerConfig> {
+    server_config_alpn(cert, DIRECT_ALPN)
+}
+
+/// 同上，但用指定的 ALPN（局域网直连用 [`airhand_proto::LAN_ALPN`]）
+pub(crate) fn server_config_alpn(cert: &Cert, alpn: &[u8]) -> Result<ServerConfig> {
     let provider = provider();
     let mut tls = rustls::ServerConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_client_cert_verifier(Arc::new(AnyClient(provider)))
         .with_single_cert(vec![cert.der.clone()], cert.key.clone_key().into())
         .context("bad direct path certificate")?;
-    tls.alpn_protocols = vec![DIRECT_ALPN.to_vec()];
+    tls.alpn_protocols = vec![alpn.to_vec()];
     tls.max_early_data_size = 0;
     let mut cfg = ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls)?));
     cfg.transport_config(Arc::new(transport()));
@@ -86,6 +91,11 @@ pub(crate) fn server_config(cert: &Cert) -> Result<ServerConfig> {
 
 /// 控制端：用证书 `cert` 连被控端的直连，只认指纹是 `host` 的被控端
 pub(crate) fn client_config(cert: &Cert, host: [u8; 32]) -> Result<ClientConfig> {
+    client_config_alpn(cert, host, DIRECT_ALPN)
+}
+
+/// 同上，但用指定的 ALPN（局域网直连用 [`airhand_proto::LAN_ALPN`]）
+pub(crate) fn client_config_alpn(cert: &Cert, host: [u8; 32], alpn: &[u8]) -> Result<ClientConfig> {
     let provider = provider();
     let mut tls = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?
@@ -96,7 +106,24 @@ pub(crate) fn client_config(cert: &Cert, host: [u8; 32]) -> Result<ClientConfig>
         }))
         .with_client_auth_cert(vec![cert.der.clone()], cert.key.clone_key().into())
         .context("bad direct path certificate")?;
-    tls.alpn_protocols = vec![DIRECT_ALPN.to_vec()];
+    tls.alpn_protocols = vec![alpn.to_vec()];
+    let mut cfg = ClientConfig::new(Arc::new(QuicClientConfig::try_from(tls)?));
+    cfg.transport_config(Arc::new(transport()));
+    Ok(cfg)
+}
+
+/// 局域网直连的控制端配置：任何服务器证书都接受（照样校验 TLS 1.3 握手签名）。
+/// 局域网直连的端到端安全在 Noise 的账号密码 PSK 里（见 [`crate::lan`]），TLS 只是传输包皮，
+/// 没有预先交换的证书指纹可固定。
+pub(crate) fn client_config_lan(cert: &Cert) -> Result<ClientConfig> {
+    let provider = provider();
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AnyServer(provider)))
+        .with_client_auth_cert(vec![cert.der.clone()], cert.key.clone_key().into())
+        .context("bad LAN path certificate")?;
+    tls.alpn_protocols = vec![LAN_ALPN.to_vec()];
     let mut cfg = ClientConfig::new(Arc::new(QuicClientConfig::try_from(tls)?));
     cfg.transport_config(Arc::new(transport()));
     Ok(cfg)
@@ -213,5 +240,47 @@ impl ClientCertVerifier for AnyClient {
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+/// 任何服务器证书都接受（照样校验 TLS 1.3 握手签名）。局域网直连的控制端用（见 [`client_config_lan`]）：
+/// 端到端安全在 Noise 的账号密码 PSK 里，TLS 只是传输包皮。
+#[derive(Debug)]
+struct AnyServer(Arc<CryptoProvider>);
+
+impl ServerCertVerifier for AnyServer {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _: &[u8],
+        _: &CertificateDer<'_>,
+        _: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::General("TLS 1.2 isn't used".into()))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        tls13_signature(&self.0, message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }

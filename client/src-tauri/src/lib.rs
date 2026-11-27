@@ -57,6 +57,8 @@ use i18n::Lang;
 use status::{HostStatus, Mode, StatusHub};
 
 const CONSOLE: &str = "main";
+/// 局域网直连设置窗口（托盘菜单"局域网直连设置…"打开，见 [`open_lan_settings`]）
+const LAN_SETTINGS: &str = "lan-settings";
 
 /// 正在退出（或卸载）：关掉控制台时不再切回被控端（见 [`on_console_destroyed`]）
 static EXITING: AtomicBool = AtomicBool::new(false);
@@ -73,6 +75,9 @@ pub struct AppState {
     service_mode: bool,
     /// 控制台连过来的 WebSocket 地址（第一次要的时候开始监听，见 [`console`]）
     console: tokio::sync::OnceCell<String>,
+    /// 局域网直连设置的发送端：设置窗口改账号/密码/端口时推送最新配置，被控端据此重启 listener
+    /// （见 `host::start_lan`）。初始值来自进程启动时读到的 `config.toml`
+    lan: tokio::sync::watch::Sender<config::LanSettings>,
 }
 
 #[derive(Default)]
@@ -187,6 +192,7 @@ fn switch_services(app: &AppHandle, mode: Mode) {
                 sv.host = Some(Hosting::InProcess(HostService::start(
                     state.hub.clone(),
                     state.host_code.clone(),
+                    state.lan.subscribe(),
                 )));
                 #[cfg(target_os = "macos")]
                 host::macos::request_permissions();
@@ -321,6 +327,62 @@ fn console_title() -> String {
     tr!("Airhand 控制台", "Airhand Console")
 }
 
+/// 打开局域网直连设置窗口（托盘菜单"局域网直连设置…"）：一个无边框小窗口，加载和
+/// [`CONSOLE`] 同一个前端，靠 `window.__AIRHAND_LAN_SETTINGS__` 区分渲染设置表单（见
+/// `client/src/App.tsx` 的 [`LanSettingsView`]）。
+fn open_lan_settings(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window(LAN_SETTINGS) {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    show_in_dock(app, true);
+    let app = app.clone();
+    // 和 [`open_console`] 一样，Windows 上放到异步任务里创建 WebView2
+    tauri::async_runtime::spawn(async move {
+        let builder = WebviewWindowBuilder::new(&app, LAN_SETTINGS, WebviewUrl::App("index.html".into()));
+        #[cfg(not(target_os = "macos"))]
+        let builder = {
+            let dir = ephemeral::new_dir();
+            app.state::<AppState>()
+                .webview_dirs
+                .lock()
+                .unwrap()
+                .push(dir.clone());
+            builder.data_directory(dir)
+        };
+        let builder = builder
+            .title(tr!("局域网直连设置", "LAN direct settings"))
+            // 让前端识别这是设置窗口（渲染设置表单而非控制台），首屏就用当前语言
+            .initialization_script(format!(
+                "window.__AIRHAND_LAN_SETTINGS__ = true;window.__AIRHAND_LANG__ = {:?};",
+                i18n::current().code()
+            ))
+            .inner_size(420.0, 360.0)
+            .resizable(false)
+            .maximizable(false)
+            .minimizable(false)
+            .center()
+            .incognito(true)
+            .disable_drag_drop_handler()
+            .background_color(tauri::window::Color(9, 11, 16, 255))
+            .theme(Some(tauri::Theme::Dark));
+        // 无边框：标题栏由界面画（见 client/src 的 LanSettingsView）。macOS 保留系统标题栏 + 红绿灯
+        #[cfg(not(target_os = "macos"))]
+        let builder = builder.decorations(false);
+        #[cfg(target_os = "macos")]
+        let builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay).hidden_title(true);
+        match builder.build() {
+            Ok(w) => {
+                let _ = w.set_focus();
+            }
+            Err(e) => warn!("can't open the LAN settings window: {e}"),
+        }
+    });
+}
+
 /// 切换界面语言（托盘菜单或控制台），记进配置文件：选过一次之后不再跟随系统语言。
 fn set_lang(app: &AppHandle, lang: Lang) {
     let state = app.state::<AppState>();
@@ -378,6 +440,7 @@ pub(crate) fn on_menu(app: &AppHandle, id: &str) {
         // Windows 安装版从被控端模式打开控制台时，也要启动控制端服务，不能只创建窗口。
         "to_controller" | "console" => set_mode(app, Mode::Controller),
         "to_host" => set_mode(app, Mode::Host),
+        "lan_settings" => open_lan_settings(app),
         "lang_zh" => set_lang(app, Lang::Zh),
         "lang_en" => set_lang(app, Lang::En),
         "kick_all" | "new_code" => {
@@ -611,6 +674,97 @@ async fn devices_save(
         .map_err(|e| Problem::failed(format!("{e:#}")))
 }
 
+/// 局域网直连设置窗口要显示的数据：账号、监听地址、是否开启。不返回密码和 PSK（密码不回显，PSK 是派生的秘密）
+#[derive(Serialize)]
+struct LanSettingsView {
+    enabled: bool,
+    listen: String,
+    account: String,
+}
+
+/// 读取局域网直连的当前设置（设置窗口打开时）。读"当前生效"的配置（见 [`config::current_lan`]），
+/// 这样本次运行里改过的设置会正确回显，而不是进程启动时的旧值。
+#[tauri::command]
+fn lan_settings_load() -> LanSettingsView {
+    let s = config::current_lan();
+    LanSettingsView {
+        enabled: s.enabled,
+        listen: s.listen.clone(),
+        account: s.account.clone(),
+    }
+}
+
+/// 保存局域网直连设置（设置窗口里点的"保存"）：账号、密码、监听端口、是否开启。
+///
+/// * 密码只在这里用一次：PBKDF2 派生出握手 PSK 存进 config.toml，不存密码本身（见 [`config::save_lan`]）；
+///   密码留空表示不改密码，沿用现有的 PSK（只改端口/账号/开关时不用重新输入密码）；
+/// * 校验：账号非空、端口是合法地址；不合法返回错误，由界面提示；
+/// * 保存成功后被控端（本进程）据此重启 listener，立即生效（见 [`host::start_lan`]）；
+/// * Windows 安装版：配置由服务里的被控端维护，经命名管道交给它写并重启 listener（见 [`winsvc::ipc::ToAgent::SetLan`]）。
+#[tauri::command]
+#[cfg_attr(not(windows), allow(unused_variables))]
+async fn lan_settings_save(
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+    listen: String,
+    account: String,
+    password: String,
+) -> Result<(), Problem> {
+    let bad = |what: &str| Problem::failed(format!("{what}"));
+    let account = account.trim();
+    if account.is_empty() {
+        return Err(bad("account is empty"));
+    }
+    let listen = listen.trim();
+    if listen.parse::<std::net::SocketAddr>().is_err() {
+        return Err(bad(&format!("listen address {listen:?} isn't valid")));
+    }
+    // 密码留空：沿用现有的 PSK（只改端口/账号/开关）；否则由「账号 + 密码」重新派生
+    let password = password.trim();
+    let psk = if password.is_empty() {
+        // 用"当前生效"的 PSK（本次运行里改过就取新值），而不是进程启动时的旧值。
+        // 读 current_lan 而非 state.lan：服务模式下写盘在服务进程，托盘的 watch 不会同步。
+        config::current_lan().psk
+    } else {
+        airhand_link::lan::hex(&airhand_link::lan::psk(account, password))
+    };
+    let settings = config::LanSettings {
+        enabled,
+        listen: listen.to_string(),
+        account: account.to_string(),
+        psk,
+    };
+
+    // Windows 安装版：交给服务里的被控端写（托盘没有写安装目录的权限）
+    #[cfg(windows)]
+    if state.service_mode {
+        let connected = state.hub.borrow().service.is_some_and(|s| s.connected);
+        let sv = state.services.lock().unwrap();
+        return match &sv.host {
+            Some(Hosting::Service(link)) if connected => {
+                // 服务进程写盘并更新它自己的当前生效配置（认证用）；本进程更新回显用的
+                // 当前生效配置（设置窗口、托盘显示），两边都免重启立即生效。
+                config::apply_lan(&settings);
+                link.send(winsvc::ipc::ToAgent::SetLan { settings });
+                Ok(())
+            }
+            _ => Err(Problem::failed(
+                "the Airhand service isn't reachable from this session",
+            )),
+        };
+    }
+
+    // 本进程维护配置：写进 config.toml，然后让被控端重启 listener（不影响进行中的远程会话）
+    let to_save = settings.clone();
+    let saved = tauri::async_runtime::spawn_blocking(move || config::save_lan(&to_save))
+        .await
+        .map_err(Problem::failed)?
+        .map_err(|e| Problem::failed(format!("{e:#}")))?;
+    // 保存成功，通知被控端用新设置重启 listener
+    let _ = state.lan.send_replace(settings);
+    Ok(saved)
+}
+
 /// 控制台切换界面语言
 #[tauri::command]
 fn set_language(app: AppHandle, lang: Lang) {
@@ -715,8 +869,13 @@ pub fn run() {
     let user_install = !service_mode && winsvc::user::installed_here();
     #[cfg(all(windows, not(debug_assertions)))]
     if !service_mode && !user_install {
-        winsvc::show_not_installed();
-        return;
+        // 绿色便携模式（临时测试 / 局域网验收用）：设了 AIRHAND_PORTABLE=1 就允许未安装直接运行，
+        // 被控端在本进程里（和调试构建一样，没有系统服务、没有虚拟显示器），不用跑安装程序。
+        // 正式使用仍请安装：那样才有系统服务、锁屏前可连等能力。
+        if !std::env::var_os("AIRHAND_PORTABLE").is_some_and(|v| v == "1") {
+            winsvc::show_not_installed();
+            return;
+        }
     }
     // 这台电脑（被别的用户）为所有用户安装了 Airhand：被控端在它的系统服务里运行，仅为当前用户安装的这一份让开
     // （否则两个被控端同时运行）。在占用单实例之前检查：登录时两份一起启动的话，不能挡住为所有用户安装的那份托盘
@@ -773,6 +932,8 @@ pub fn run() {
     clipfiles::macos::init(&hub);
     #[cfg(target_os = "macos")]
     awdl::init(&hub);
+    // 局域网直连设置：初始值来自进程启动时读到的 config.toml，之后设置窗口里改了会推新值
+    let (lan_tx, _) = tokio::sync::watch::channel(config::settings().lan.clone());
     let app = tauri::Builder::default()
         .manage(AppState {
             hub: hub.clone(),
@@ -782,6 +943,7 @@ pub fn run() {
             webview_dirs: Mutex::default(),
             service_mode,
             console: Default::default(),
+            lan: lan_tx,
         })
         // 控制台的麦克风（把本机的麦克风发给对方，见 client/src/lib/mic.ts）：用户在连接里打开了才会用到，
         // 直接允许，不再弹 WebView 自己的询问（控制台的数据目录是临时的，不然每次打开控制台都要问一遍）
@@ -802,6 +964,8 @@ pub fn run() {
             switch_to_host,
             devices_load,
             devices_save,
+            lan_settings_load,
+            lan_settings_save,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -821,7 +985,8 @@ pub fn run() {
                 start_service_link(&handle, &hub)
             } else {
                 let code = app.state::<AppState>().host_code.clone();
-                Hosting::InProcess(HostService::start(hub.clone(), code))
+                let lan = app.state::<AppState>().lan.subscribe();
+                Hosting::InProcess(HostService::start(hub.clone(), code, lan))
             };
             app.state::<AppState>().services.lock().unwrap().host = Some(hosting);
             // 仅调试构建：方便开发时直接进入控制端
@@ -853,6 +1018,7 @@ pub fn run() {
                             let _ = w.set_title(&console_title());
                         }
                         let _ = handle.emit_to(CONSOLE, "lang-changed", cur);
+                        let _ = handle.emit_to(LAN_SETTINGS, "lang-changed", cur);
                     }
                     if rx.changed().await.is_err() {
                         break;
@@ -864,6 +1030,13 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == CONSOLE && matches!(event, WindowEvent::Destroyed) {
                 on_console_destroyed(window.app_handle());
+            }
+            // macOS：设置窗口关掉后，如果控制台也没开着，程序坞里的图标去掉（回到只有托盘的状态）
+            if window.label() == LAN_SETTINGS && matches!(event, WindowEvent::Destroyed) {
+                #[cfg(target_os = "macos")]
+                if window.app_handle().get_webview_window(CONSOLE).is_none() {
+                    show_in_dock(window.app_handle(), false);
+                }
             }
         })
         .build(tauri::generate_context!())

@@ -64,11 +64,15 @@ pub fn run(args: &[String]) -> i32 {
     }
     config::keep_file();
     let hub = status::new_hub();
-    let host = HostService::start(hub.clone(), HostCode::default());
+    // 局域网直连设置：初始值来自进程启动时读到的 config.toml，托盘在设置窗口里改了会经 IPC 推新值，
+    // 被控端据此重启 listener
+    let (lan_tx, _) = watch::channel(config::settings().lan.clone());
+    let host = HostService::start(hub.clone(), HostCode::default(), lan_tx.subscribe());
     let agent = super::ipc::Agent {
         cmds: host.commands(),
         autostart: Arc::new(watch::Sender::new(config::settings().autostart)),
         gate: host.gate().clone(),
+        lan: lan_tx,
     };
     tauri::async_runtime::spawn(super::ipc::serve(hub, agent));
     // 剪贴板里的文件交给托盘（见 super::clip）

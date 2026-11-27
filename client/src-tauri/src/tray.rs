@@ -8,6 +8,7 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Wry};
 
+use crate::config;
 use crate::i18n::{self, Lang};
 use crate::status::{AppStatus, HOST_WITH_CONSOLE, Mode, ServiceStatus};
 use airhand_link::{Problem, ServerState};
@@ -419,6 +420,21 @@ fn host_items(app: &AppHandle, menu: &Menu<Wry>, st: &AppStatus) -> tauri::Resul
             )?)?;
             pairing_items(app, menu, st)?;
         }
+        if let Some(lan) = &st.host.lan {
+            menu.append(&label(
+                app,
+                tr!(
+                    "局域网直连：{lan}（账号 {account}）",
+                    "LAN direct: {lan} (account {account})",
+                    account = config::current_lan().account
+                ),
+            )?)?;
+        }
+        menu.append(&item(
+            app,
+            "lan_settings",
+            tr!("局域网直连设置…", "LAN direct settings…"),
+        )?)?;
         if !st.host.controllers.is_empty() {
             menu.append(&PredefinedMenuItem::separator(app)?)?;
             menu.append(&label(

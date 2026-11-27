@@ -29,6 +29,12 @@ use airhand_link::ServerState;
 use crate::host::{HostCode, HostService};
 use crate::status;
 
+/// 端到端测试里启动被控端的便捷封装：局域网直连设置用默认值（测试不走直连路径）
+fn start_host(hub: status::StatusHub, code: HostCode) -> HostService {
+    let (_lan, lan_rx) = tokio::sync::watch::channel(crate::config::LanSettings::default());
+    HostService::start(hub, code, lan_rx)
+}
+
 /// 控制通道（或者大块通道）的发送端：加密之后写进去
 struct Ctl {
     send: quinn::SendStream,
@@ -110,6 +116,7 @@ async fn open_session(
         me: &me,
         host_key: None,
         pairing,
+        lan: None,
         intro: &intro,
     })
     .unwrap();
@@ -155,7 +162,7 @@ async fn e2e_roundtrip() {
         .with_env_filter("info,quinn=warn")
         .try_init();
     let hub = status::new_hub();
-    let _host = HostService::start(hub.clone(), HostCode::default());
+    let _host = start_host(hub.clone(), HostCode::default());
     let (code, pairing) = wait_host(&hub).await;
     println!("被控端控制码: {code}，配对码: {pairing:?}");
 
@@ -555,7 +562,7 @@ async fn e2e_multi_display() {
         .with_env_filter("info,quinn=warn")
         .try_init();
     let hub = status::new_hub();
-    let _host = HostService::start(hub.clone(), HostCode::default());
+    let _host = start_host(hub.clone(), HostCode::default());
     let (code, pairing) = wait_host(&hub).await;
     let mut sig = airhand_link::net::connect_signal(&crate::config::link(), Role::Controller, None)
         .await
@@ -737,7 +744,7 @@ async fn e2e_mic() {
         .with_env_filter("info,quinn=warn,airhand_lib::host::mic=debug")
         .try_init();
     let hub = status::new_hub();
-    let _host = HostService::start(hub.clone(), HostCode::default());
+    let _host = start_host(hub.clone(), HostCode::default());
     let (code, pairing) = wait_host(&hub).await;
     let mut sig = airhand_link::net::connect_signal(&crate::config::link(), Role::Controller, None)
         .await
@@ -902,7 +909,7 @@ async fn e2e_mic() {
 async fn restart_host(host: HostService, code: &HostCode) -> (HostService, status::StatusHub, u32) {
     drop(host);
     let hub = status::new_hub();
-    let host = HostService::start(hub.clone(), code.clone());
+    let host = start_host(hub.clone(), code.clone());
     let got = wait_code(&hub).await;
     (host, hub, got)
 }
@@ -932,7 +939,7 @@ async fn e2e_reconnect_keeps_code() {
     let mut server = spawn();
     let host_code = HostCode::default();
     let hub = status::new_hub();
-    let host = HostService::start(hub.clone(), host_code.clone());
+    let host = start_host(hub.clone(), host_code.clone());
     let code = wait_code(&hub).await;
     println!("初始控制码 {code}");
 

@@ -69,6 +69,19 @@ class DesktopConsole extends ConsoleLink implements Backend {
     return invoke<void>("devices_save", { devices });
   }
 
+  lanSettingsLoad() {
+    return invoke<import("../api").LanSettings>("lan_settings_load");
+  }
+
+  lanSettingsSave(s: import("../api").LanSettingsInput) {
+    return invoke<void>("lan_settings_save", {
+      enabled: s.enabled,
+      listen: s.listen,
+      account: s.account,
+      password: s.password,
+    });
+  }
+
   setLanguage(lang: Lang) {
     return invoke<void>("set_language", { lang });
   }

@@ -63,6 +63,37 @@ export async function openSession(code: string, settings: QualitySettings, opts:
   }
 }
 
+/** 连接局域网直连的被控端（不经过中转服务器），在新建连接标签里显示进度和错误，连上后这个标签变成会话标签。 */
+export async function openLanSession(
+  addr: string,
+  account: string,
+  password: string,
+  settings: QualitySettings,
+): Promise<void> {
+  const st = store.get();
+  if (!st.draft) store.newTab();
+  if (store.get().draft?.busy) return;
+  // 局域网直连没有控制码、也不进"我的设备"：code 用一个占位（界面用 hostName / 账号显示标题）
+  store.patchDraft({ digits: Array(6).fill(""), busy: true, error: null });
+  const s = new RemoteSession(account, settings, undefined, null, { addr, account, password });
+  pending = s;
+  try {
+    await s.open();
+    if (pending !== s) {
+      s.dispose();
+      return;
+    }
+    store.add(s);
+    s.onSettingsChange = () => {};
+    s.onInputSettingsChange = () => {};
+  } catch (e) {
+    s.dispose();
+    if (pending === s) store.patchDraft({ busy: false, error: toProblem(e) });
+  } finally {
+    if (pending === s) pending = null;
+  }
+}
+
 /** 关闭新建连接标签（正在连接就放弃） */
 export function closeDraft() {
   const st = store.get();

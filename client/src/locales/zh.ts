@@ -82,6 +82,16 @@ export default {
   "connect.pairing": "配对码",
   "connect.pairingHint": "对方显示的 6 位配对码（电脑在托盘菜单里，手机在 Airhand 的“共享本机”页）。配对之后对方记住本机，下次不用再输",
   "connect.customQuality": "自定义画质",
+  // 局域网直连（新建连接页的另一种连接方式）
+  "connect.mode": "连接方式",
+  "connect.mode.code": "中转（控制码）",
+  "connect.mode.lan": "局域网直连",
+  "connect.lan.hint": "同一局域网里的两台电脑不经过中转服务器：输入对方电脑监听的 IP 和端口，以及它设置的账号和密码",
+  "connect.lan.addr": "IP 地址",
+  "connect.lan.port": "端口",
+  "connect.lan.addrHint": "对方 Airhand 设置里显示监听的 IP，端口默认是 4900，例如 192.168.1.10",
+  "connect.lan.account": "账号",
+  "connect.lan.password": "密码",
 
   // 我的设备（新建连接页）
   "devices.title": "我的设备",
@@ -96,6 +106,21 @@ export default {
   "devices.undo": "撤销",
   "devices.open": "已打开",
   "devices.known": "我的设备：{name}",
+
+  // 局域网直连设置窗口（托盘菜单"局域网直连设置…"打开）
+  "lanSettings.title": "局域网直连设置",
+  "lanSettings.close": "关闭",
+  "lanSettings.enabled": "开启局域网直连",
+  "lanSettings.listen": "监听地址",
+  "lanSettings.listenHint": "本机监听的 UDP 端口，例如 0.0.0.0:4900（0.0.0.0 表示所有网卡）",
+  "lanSettings.account": "账号",
+  "lanSettings.password": "密码",
+  "lanSettings.passwordHint": "密码只在本地派生密钥，不存储、不上传；留空则保持原密码",
+  "lanSettings.save": "保存",
+  "lanSettings.saving": "保存中…",
+  "lanSettings.cancel": "取消",
+  "lanSettings.accountEmpty": "账号不能为空",
+  "lanSettings.listenEmpty": "监听地址不能为空",
 
   // 画质预设
   "preset.saver": "省流",
@@ -364,6 +389,7 @@ export default {
   "problem.pairingRequired": "第一次连接这台设备，需要配对码：电脑在对方的 Airhand 托盘菜单里，手机在对方 Airhand 的“共享本机”页",
   "problem.pairingFailed": "配对码不对，请核对对方显示的配对码",
   "problem.pairingUnavailable": "对方暂停了配对（有人多次输错配对码）：请对方换一个配对码",
+  "problem.lanAuthFailed": "局域网直连的账号或密码不对",
   "problem.peerIncompatible": (p) =>
     Number(p.peer) > Number(p.ours) ? "与对方电脑的版本不兼容：对方较新，请更新本机的 Airhand" : "与对方电脑的版本不兼容：对方较旧，请对方更新 Airhand",
   // 会话

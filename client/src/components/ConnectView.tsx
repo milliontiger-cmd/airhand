@@ -3,7 +3,7 @@
 // 输入的内容放在 store 里（Draft），切到别的标签再回来时还在。
 import { useEffect, useRef, useState } from "react";
 import type { SavedDevice } from "../lib/api";
-import { fmtCode, forgetDevice, openSession, renameDevice, resetDraft, restoreDevice } from "../lib/actions";
+import { fmtCode, forgetDevice, openLanSession, openSession, renameDevice, resetDraft, restoreDevice } from "../lib/actions";
 import { deviceTitle, matchDevice, relativeTime } from "../lib/devices";
 import { getLang, useT } from "../lib/i18n";
 import { problemText, sessionStateText } from "../lib/messages";
@@ -45,19 +45,31 @@ export function ConnectView() {
   }, [busy, error]);
 
   if (!draft) return null;
-  const { digits, preset, pairing } = draft;
+  const { digits, preset, pairing, mode, lan } = draft;
   // 还不知道对方支持什么：先按本机能解码的选，连上后会按双方都支持的重新选（见 RemoteSession.fitCodec）
   const codec = bestCodec(decoders);
   const code = digits.join("");
   const ready = /^\d{6}$/.test(code) && code[0] !== "0";
   const online = server.state === "connected";
   // 输入的是我的设备里的：告诉用户是哪台
-  const known = ready ? devices.find((d) => d.code === code) : undefined;
+  const known = mode === "code" && ready ? devices.find((d) => d.code === code) : undefined;
 
-  // 对方要配对码（或者已经粘贴 / 输入了配对码）：显示配对码一栏
-  const pairingProblem = error && PAIRING_PROBLEMS.has(error.kind);
+  // 对方要配对码（或者已经粘贴 / 输入了配对码）：显示配对码一栏（只在中转模式）
+  const pairingProblem = mode === "code" && error && PAIRING_PROBLEMS.has(error.kind);
   const showPairing = pairingProblem || pairing.length > 0;
   const pairingReady = /^\d{6}$/.test(pairing);
+
+  // 局域网直连：IP、端口（1-65535）和账号都填了、密码非空即可连（不依赖中转服务器，所以不需要 online）
+  const lanPort = Number(lan.port);
+  const lanAddr = `${lan.addr.trim()}:${lan.port.trim()}`;
+  const lanReady =
+    lan.addr.trim() !== "" &&
+    !/[\s:]/.test(lan.addr.trim()) &&
+    Number.isInteger(lanPort) &&
+    lanPort > 0 &&
+    lanPort <= 65535 &&
+    lan.account.trim() !== "" &&
+    lan.password !== "";
 
   const setFrom = (start: number, text: string) => {
     const only = text.replace(/\D/g, "");
@@ -79,6 +91,11 @@ export function ConnectView() {
   };
 
   const connect = () => {
+    if (mode === "lan") {
+      if (!lanReady || busy) return;
+      void openLanSession(lanAddr, lan.account.trim(), lan.password, presetSettings(preset, codec));
+      return;
+    }
     if (!ready || busy || !online) return;
     void openSession(code, presetSettings(preset, codec), { pairing: pairingReady ? pairing : null });
   };
@@ -95,92 +112,191 @@ export function ConnectView() {
               <IconMonitor size={26} />
             </div>
             <h1>{t("connect.title")}</h1>
-            <p className="muted">{t("connect.hint")}</p>
+            <p className="muted">{mode === "lan" ? t("connect.lan.hint") : t("connect.hint")}</p>
           </div>
 
           <div className="nt-field">
             <div className="nt-label">
-              <span>
-                {t("connect.code")}
-                {known && <span className="nt-known">{t("devices.known", { name: deviceTitle(known) })}</span>}
-              </span>
-              {code.length > 0 && !busy && (
-                <button className="text-btn" onClick={() => (resetDraft(), inputs.current[0]?.focus())}>
-                  {t("connect.clear")}
-                </button>
-              )}
+              <span>{t("connect.mode")}</span>
             </div>
-            <div
-              className={`code-inputs ${error ? "invalid" : ""}`}
-              onPaste={(e) => (e.preventDefault(), setFrom(0, e.clipboardData.getData("text")))}
-            >
-              {digits.map((d, i) => (
-                <input
-                  key={i}
-                  ref={(el) => {
-                    inputs.current[i] = el;
-                  }}
-                  className={`code-box ${d ? "filled" : ""} ${i === 3 ? "gap" : ""}`}
-                  value={d}
-                  inputMode="numeric"
-                  autoComplete="off"
-                  maxLength={1}
-                  disabled={busy}
-                  aria-label={`${t("connect.code")} ${i + 1}`}
-                  onFocus={(e) => e.target.select()}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    if (v.length > 1) return setFrom(i, v);
-                    if (/^\d$/.test(v)) setFrom(i, v);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Backspace") {
-                      e.preventDefault();
-                      const next = [...digits];
-                      if (next[i]) next[i] = "";
-                      else if (i > 0) {
-                        next[i - 1] = "";
-                        inputs.current[i - 1]?.focus();
-                      }
-                      store.patchDraft({ digits: next, error: null });
-                    } else if (e.key === "Delete") {
-                      e.preventDefault();
-                      const next = [...digits];
-                      next[i] = "";
-                      store.patchDraft({ digits: next, error: null });
-                    } else if (e.key === "ArrowLeft" && i > 0) inputs.current[i - 1]?.focus();
-                    else if (e.key === "ArrowRight" && i < 5) inputs.current[i + 1]?.focus();
-                    else if (e.key === "Home") inputs.current[0]?.focus();
-                    else if (e.key === "End") inputs.current[5]?.focus();
-                    else if (e.key === "Enter") connect();
-                  }}
-                />
-              ))}
+            <div className="segmented presets">
+              <button
+                className={mode === "code" ? "active" : ""}
+                onClick={() => store.patchDraft({ mode: "code", error: null })}
+                disabled={busy}
+              >
+                {t("connect.mode.code")}
+              </button>
+              <button
+                className={mode === "lan" ? "active" : ""}
+                // 局域网直连不经过中转、带宽更充裕：切到 LAN 时画质默认高清（用户仍可手动改）
+                onClick={() => store.patchDraft({ mode: "lan", preset: "hd", error: null })}
+                disabled={busy}
+              >
+                {t("connect.mode.lan")}
+              </button>
             </div>
           </div>
 
-          {showPairing && (
-            <div className="nt-field">
-              <div className="nt-label">
-                <span>{t("connect.pairing")}</span>
+          {mode === "code" ? (
+            <>
+              <div className="nt-field">
+                <div className="nt-label">
+                  <span>
+                    {t("connect.code")}
+                    {known && <span className="nt-known">{t("devices.known", { name: deviceTitle(known) })}</span>}
+                  </span>
+                  {code.length > 0 && !busy && (
+                    <button className="text-btn" onClick={() => (resetDraft(), inputs.current[0]?.focus())}>
+                      {t("connect.clear")}
+                    </button>
+                  )}
+                </div>
+                <div
+                  className={`code-inputs ${error ? "invalid" : ""}`}
+                  onPaste={(e) => (e.preventDefault(), setFrom(0, e.clipboardData.getData("text")))}
+                >
+                  {digits.map((d, i) => (
+                    <input
+                      key={i}
+                      ref={(el) => {
+                        inputs.current[i] = el;
+                      }}
+                      className={`code-box ${d ? "filled" : ""} ${i === 3 ? "gap" : ""}`}
+                      value={d}
+                      inputMode="numeric"
+                      autoComplete="off"
+                      maxLength={1}
+                      disabled={busy}
+                      aria-label={`${t("connect.code")} ${i + 1}`}
+                      onFocus={(e) => e.target.select()}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v.length > 1) return setFrom(i, v);
+                        if (/^\d$/.test(v)) setFrom(i, v);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Backspace") {
+                          e.preventDefault();
+                          const next = [...digits];
+                          if (next[i]) next[i] = "";
+                          else if (i > 0) {
+                            next[i - 1] = "";
+                            inputs.current[i - 1]?.focus();
+                          }
+                          store.patchDraft({ digits: next, error: null });
+                        } else if (e.key === "Delete") {
+                          e.preventDefault();
+                          const next = [...digits];
+                          next[i] = "";
+                          store.patchDraft({ digits: next, error: null });
+                        } else if (e.key === "ArrowLeft" && i > 0) inputs.current[i - 1]?.focus();
+                        else if (e.key === "ArrowRight" && i < 5) inputs.current[i + 1]?.focus();
+                        else if (e.key === "Home") inputs.current[0]?.focus();
+                        else if (e.key === "End") inputs.current[5]?.focus();
+                        else if (e.key === "Enter") connect();
+                      }}
+                    />
+                  ))}
+                </div>
               </div>
-              <input
-                className={`pairing-input ${pairingProblem && !pairingReady ? "invalid" : ""}`}
-                value={pairing}
-                inputMode="numeric"
-                autoComplete="off"
-                maxLength={7}
-                placeholder="000 000"
-                disabled={busy}
-                aria-label={t("connect.pairing")}
-                autoFocus={!!pairingProblem}
-                onChange={(e) => store.patchDraft({ pairing: e.target.value.replace(/\D/g, "").slice(0, 6) })}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") connect();
-                }}
-              />
-              <div className="preset-desc muted small">{t("connect.pairingHint")}</div>
-            </div>
+
+              {showPairing && (
+                <div className="nt-field">
+                  <div className="nt-label">
+                    <span>{t("connect.pairing")}</span>
+                  </div>
+                  <input
+                    className={`pairing-input ${pairingProblem && !pairingReady ? "invalid" : ""}`}
+                    value={pairing}
+                    inputMode="numeric"
+                    autoComplete="off"
+                    maxLength={7}
+                    placeholder="000 000"
+                    disabled={busy}
+                    aria-label={t("connect.pairing")}
+                    autoFocus={!!pairingProblem}
+                    onChange={(e) => store.patchDraft({ pairing: e.target.value.replace(/\D/g, "").slice(0, 6) })}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") connect();
+                    }}
+                  />
+                  <div className="preset-desc muted small">{t("connect.pairingHint")}</div>
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <div className="nt-field">
+                <div className="nt-label">
+                  <span>{t("connect.lan.addr")}</span>
+                </div>
+                <div className="lan-addr-row">
+                  <input
+                    className={`pairing-input ${error && !lanReady ? "invalid" : ""}`}
+                    value={lan.addr}
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="192.168.1.10"
+                    disabled={busy}
+                    aria-label={t("connect.lan.addr")}
+                    onChange={(e) => store.patchDraft({ lan: { ...lan, addr: e.target.value }, error: null })}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") connect();
+                    }}
+                  />
+                  <input
+                    className={`pairing-input lan-port-input ${error && !lanReady ? "invalid" : ""}`}
+                    value={lan.port}
+                    inputMode="numeric"
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="4900"
+                    disabled={busy}
+                    aria-label={t("connect.lan.port")}
+                    onChange={(e) => store.patchDraft({ lan: { ...lan, port: e.target.value }, error: null })}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") connect();
+                    }}
+                  />
+                </div>
+                <div className="preset-desc muted small">{t("connect.lan.addrHint")}</div>
+              </div>
+              <div className="nt-field">
+                <div className="nt-label">
+                  <span>{t("connect.lan.account")}</span>
+                </div>
+                <input
+                  className="pairing-input"
+                  value={lan.account}
+                  autoComplete="off"
+                  spellCheck={false}
+                  disabled={busy}
+                  aria-label={t("connect.lan.account")}
+                  onChange={(e) => store.patchDraft({ lan: { ...lan, account: e.target.value }, error: null })}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") connect();
+                  }}
+                />
+              </div>
+              <div className="nt-field">
+                <div className="nt-label">
+                  <span>{t("connect.lan.password")}</span>
+                </div>
+                <input
+                  className="pairing-input"
+                  type="password"
+                  value={lan.password}
+                  autoComplete="off"
+                  disabled={busy}
+                  aria-label={t("connect.lan.password")}
+                  onChange={(e) => store.patchDraft({ lan: { ...lan, password: e.target.value }, error: null })}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") connect();
+                  }}
+                />
+              </div>
+            </>
           )}
 
           <div className="nt-field">
@@ -211,8 +327,8 @@ export function ConnectView() {
               <span>{problemText(error)}</span>
             </div>
           )}
-          {/* 连不上服务器：说明为什么连接按钮不能点（会自动重试，重试期间也留着） */}
-          {!online && serverProblem && (
+          {/* 连不上服务器：说明为什么连接按钮不能点（会自动重试，重试期间也留着）。局域网直连不经过服务器，不用等 */}
+          {mode === "code" && !online && serverProblem && (
             <div className="error-box soft" role="status">
               <span className={`dot ${server.state === "connecting" ? "connecting" : "closed"}`} />
               <span>
@@ -224,13 +340,25 @@ export function ConnectView() {
             </div>
           )}
 
-          <button className="primary-btn" disabled={!ready || busy || !online} onClick={connect}>
+          <button
+            className="primary-btn"
+            disabled={busy || (mode === "lan" ? !lanReady : !ready || !online)}
+            onClick={connect}
+          >
             {busy ? <span className="spinner" /> : <IconBolt size={18} />}
-            <span>{busy ? t("connect.busy") : !online ? t("connect.waitServer") : t("connect.go")}</span>
+            <span>
+              {busy
+                ? t("connect.busy")
+                : mode === "lan"
+                  ? t("connect.go")
+                  : !online
+                    ? t("connect.waitServer")
+                    : t("connect.go")}
+            </span>
           </button>
         </section>
 
-        <MyDevices onOpen={openDevice} disabled={busy || !online} />
+        <MyDevices onOpen={openDevice} disabled={busy || !online || mode === "lan"} />
       </div>
     </div>
   );

@@ -95,6 +95,10 @@ pub enum ToAgent {
     SetLockOnEnd {
         on: bool,
     },
+    /// 局域网直连设置（设置窗口里改的账号/密码/端口/是否开启）：写进 config.toml，被控端据此重启 listener
+    SetLan {
+        settings: crate::config::LanSettings,
+    },
 }
 
 async fn send_line<W: AsyncWrite + Unpin>(w: &mut W, msg: &impl Serialize) -> Result<()> {
@@ -153,6 +157,8 @@ pub struct Agent {
     pub cmds: mpsc::UnboundedSender<HostCmd>,
     pub autostart: Arc<watch::Sender<bool>>,
     pub gate: Arc<DesktopGate>,
+    /// 局域网直连设置：托盘在设置窗口里改了经 IPC 推新值，被控端据此重启 listener（见 [`crate::host::start_lan`]）
+    pub lan: watch::Sender<crate::config::LanSettings>,
 }
 
 /// 在本会话的管道上接受托盘的连接
@@ -274,6 +280,19 @@ async fn handle(msg: ToAgent, agent: &Agent, hub: &StatusHub) {
             let hub = hub.clone();
             let _ =
                 tokio::task::spawn_blocking(move || crate::host::set_lock_on_end(&hub, on)).await;
+        }
+        ToAgent::SetLan { settings } => {
+            let to_save = settings.clone();
+            let r = tokio::task::spawn_blocking(move || crate::config::save_lan(&to_save)).await;
+            match r {
+                Ok(Ok(())) => {
+                    info!("LAN direct settings saved");
+                    // 让被控端用新设置重启 listener（不影响进行中的远程会话）
+                    agent.lan.send_replace(settings);
+                }
+                Ok(Err(e)) => warn!("can't save the LAN direct settings: {e:#}"),
+                Err(e) => warn!("can't save the LAN direct settings: {e}"),
+            }
         }
         ToAgent::SetAutostart { on } => {
             let r = tokio::task::spawn_blocking(move || {
@@ -497,6 +516,7 @@ mod tests {
             cmds: cmd_tx,
             autostart,
             gate: DesktopGate::load(hub.clone()),
+            lan: watch::Sender::new(crate::config::LanSettings::default()),
         };
         tokio::spawn(serve_on(name.clone(), hub.clone(), agent));
 

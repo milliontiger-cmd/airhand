@@ -69,7 +69,11 @@ impl OpenH264Encoder {
             .qp(QpRange::new(min_qp, 42))
             .sps_pps_strategy(SpsPpsStrategy::ConstantId)
             .intra_frame_period(IntraFramePeriod::from_num_frames(0))
-            .scene_change_detect(true)
+            // 关闭场景变化检测：补画质（画面静止时重新编码上一帧）会让 OpenH264 误判成"场景剧变"，
+            // 自动插一个不受码率控制的巨型 IDR（实测 1920×1080 约 400 KB，是正常关键帧的 60 倍），
+            // 超过流控窗口后编码线程在 wait_room 卡死、画面停住。屏幕共享的关键帧完全由上层按需请求
+            //（force_intra_frame），不需要 OpenH264 自作主张。
+            .scene_change_detect(false)
             .adaptive_quantization(false)
             .background_detection(false)
             .vui(VuiConfig::bt709());
@@ -159,6 +163,12 @@ impl VideoEncoder for OpenH264Encoder {
             .encode_at(&self.yuv, ts)
             .map_err(|e| anyhow!("encoding failed: {e}"))?;
         let ft = bs.frame_type();
+        tracing::debug!(
+            force_key,
+            ?ft,
+            layers = bs.num_layers(),
+            "openh264 encoded a frame"
+        );
         if matches!(ft, FrameType::Skip | FrameType::Invalid) {
             return Ok(None);
         }

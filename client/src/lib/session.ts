@@ -174,6 +174,11 @@ export class RemoteSession {
   retries = 0;
   /** 这个标签里连上过：之后重连凭证作废了（对方断开过所有控制端）就不再自动重连，见 connect */
   private connectedOnce = false;
+  /**
+   * 局域网直连（不经过中转服务器）：被控端监听的 `IP:端口` + 账号密码。`null` 表示这是普通的中转（控制码）会话。
+   * 密码只在本地派生 PSK（见 airhand_link::lan::psk），绝不上线；账号在握手里明文出现（定位用，不是秘密）
+   */
+  private readonly lan: { addr: string; account: string; password: string } | null;
 
   /** 连上了（第一次和每次重连）：记进我的设备 */
   onConnected: ((s: RemoteSession) => void) | null = null;
@@ -278,10 +283,12 @@ export class RemoteSession {
     settings: QualitySettings,
     saved?: Pick<SavedDevice, "resume" | "name" | "os" | "hostKey" | "mouse" | "swapCtrlCommand">,
     pairing?: string | null,
+    lan?: { addr: string; account: string; password: string } | null,
   ) {
     this.code = code;
     this.codeNum = Number(code.replace(/\D/g, ""));
     this.settings = settings;
+    this.lan = lan ?? null;
     if (saved) {
       this.resume = saved.resume;
       this.hostName = saved.name;
@@ -412,21 +419,42 @@ export class RemoteSession {
     this.placeCanvases(view.map((v) => v.display));
     this.sentView = null;
     try {
-      info = await api.connect(
-        this.code,
-        {
-          resume: this.resume,
-          hostKey: this.hostKey,
-          pairing: this.pairing,
-          settings: sent,
-          audio,
-          view,
-          privacy: this.privacyWanted,
-        },
-        this.view,
-        onEvent,
-        this.clipboardSync,
-      );
+      if (this.lan) {
+        // 局域网直连：不经过中转服务器，没有重连凭证、公钥、配对码这些概念
+        info = await api.connectLan(
+          this.lan.addr,
+          this.lan.account,
+          this.lan.password,
+          {
+            resume: null,
+            hostKey: null,
+            pairing: null,
+            settings: sent,
+            audio,
+            view,
+            privacy: this.privacyWanted,
+          },
+          this.view,
+          onEvent,
+          this.clipboardSync,
+        );
+      } else {
+        info = await api.connect(
+          this.code,
+          {
+            resume: this.resume,
+            hostKey: this.hostKey,
+            pairing: this.pairing,
+            settings: sent,
+            audio,
+            view,
+            privacy: this.privacyWanted,
+          },
+          this.view,
+          onEvent,
+          this.clipboardSync,
+        );
+      }
     } catch (e) {
       // A Closed event already decided whether to retry. An old failure must
       // not overwrite that decision, or restart a deliberately declined call.

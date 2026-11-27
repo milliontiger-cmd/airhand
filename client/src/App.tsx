@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { ConnectView } from "./components/ConnectView";
 import { GridView } from "./components/GridView";
+import { LanSettingsView } from "./components/LanSettingsView";
 import { Popouts } from "./components/PopoutView";
 import { SessionView } from "./components/SessionView";
 import { TitleBar } from "./components/TitleBar";
@@ -18,6 +19,10 @@ markPlatform();
 export function App() {
   // 语言切换时整个界面重新渲染
   useLang();
+  // 桌面版的局域网直连设置窗口（src-tauri 用 window.__AIRHAND_LAN_SETTINGS__ 标记）：渲染设置表单，不是控制台
+  if ((globalThis as { __AIRHAND_LAN_SETTINGS__?: boolean }).__AIRHAND_LAN_SETTINGS__) {
+    return <LanSettingsView />;
+  }
   // 网页版：不是安全页面（HTTPS / localhost）或浏览器太旧，没有视频解码可用
   const unsupported = webUnsupported();
   return unsupported ? <WebUnsupported reason={unsupported} /> : <Console />;

@@ -32,12 +32,13 @@ use airhand_proto::signal::Reclaim;
 
 use gate::DesktopGate;
 use tauri::async_runtime::JoinHandle;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 
 pub use airhand_link::host::HostCmd;
+pub use crate::config::LanSettings;
 
-use crate::config;
+use crate::config::{self};
 use crate::status::StatusHub;
 
 /// 在"每显示器 DPI 感知"上下文中执行（线程级）。
@@ -184,8 +185,9 @@ pub struct HostService {
 
 impl HostService {
     /// 启动被控端，状态写进 `hub` 的 [`AppStatus::host`](crate::status::AppStatus::host)。
-    /// `code`：取回哪个控制码；同一个进程里停下再启动的被控端要用同一个 [`HostCode`]
-    pub fn start(hub: StatusHub, code: HostCode) -> Self {
+    /// `code`：取回哪个控制码；同一个进程里停下再启动的被控端要用同一个 [`HostCode`]。
+    /// `lan`：局域网直连设置的 watch（设置窗口里改账号/密码/端口时经它触发 listener 重启，见 [`start_lan`]）
+    pub fn start(hub: StatusHub, code: HostCode, lan: watch::Receiver<LanSettings>) -> Self {
         clock::init();
         let lock_on_end = Some(ending::lock_on_end());
         // 不自动睡眠只有 macOS 有（菜单里只在知道现在的设置时显示）
@@ -199,7 +201,7 @@ impl HostService {
         });
         let gate = DesktopGate::load(hub.clone());
         let (cmd, rx) = mpsc::unbounded_channel();
-        let task = tauri::async_runtime::spawn(run(hub, gate.clone(), code, rx));
+        let task = tauri::async_runtime::spawn(run(hub, gate.clone(), code, lan, rx));
         Self {
             task,
             cmd,
@@ -235,6 +237,7 @@ async fn run(
     hub: StatusHub,
     gate: Arc<DesktopGate>,
     code: HostCode,
+    lan: watch::Receiver<LanSettings>,
     cmds: mpsc::UnboundedReceiver<HostCmd>,
 ) {
     // 上次意外退出时虚拟显示器还启用着、防窥撤下的本机显示器还没放回来：先恢复，再接会话
@@ -242,11 +245,13 @@ async fn run(
     // 现在的控制码（第一次启动时是 config.toml 里保存的）：第一次连接就取回它
     let reclaim = code.current();
     let events = Arc::new(TrayStatus {
-        hub,
+        hub: hub.clone(),
         gate: gate.clone(),
         code,
     });
-    airhand_link::host::run(
+    // 局域网直连 listener（见 airhand_link::host::lan）：默认开启，用户在设置里改端口 / 关闭
+    let lan = start_lan(hub.clone(), gate.clone(), lan);
+    let relay = airhand_link::host::run(
         config::link(),
         config::persistent(),
         reclaim,
@@ -258,8 +263,88 @@ async fn run(
             }
         },
         cmds,
-    )
-    .await;
+    );
+    tokio::select! {
+        _ = relay => {}
+        _ = lan => {}
+    }
+}
+
+/// 局域网直连 listener（[`airhand_link::host::lan::LanHub`]）：账号密码认证在
+/// [`airhand_link::host::serve_lan`]（经 [`session::run_lan`]）。设置里关掉（`[lan] enabled = false`）就不启动。
+/// 监听的地址写进 `status`（托盘显示）。
+///
+/// `lan` 是设置窗口改账号/密码/端口后推送的最新配置：收到就停掉旧的 listener、按新配置重启，
+/// 不影响正在进行的远程会话（那些走中转，和被控端服务无关）。
+async fn start_lan(
+    status: StatusHub,
+    gate: Arc<DesktopGate>,
+    mut lan: watch::Receiver<LanSettings>,
+) {
+    loop {
+        // 先读当前设置（可能已经因为用户在设置窗口里改过而变化），再启动 listener
+        let settings = lan.borrow().clone();
+        if !settings.enabled {
+            // 设置里关掉了：阻塞等下一次变化，别空转重试、也别刷日志
+            info!("LAN direct path is disabled in the settings");
+            status.send_modify(|s| s.host.lan = None);
+            if lan.changed().await.is_err() {
+                break;
+            }
+            continue;
+        }
+        let fut = start_lan_once(status.clone(), gate.clone(), &settings);
+        tokio::select! {
+            // listener 结束了：可能是绑定失败（同端口重启时旧 socket 还没释放，见下），
+            // 也可能是被控端服务被丢掉。退避后重试，不要直接 break——否则一次绑定失败
+            // 就会让 listener 永久消失，改完设置后新旧参数都连不上，只能重启进程。
+            _ = fut => {
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(300)) => {}
+                    // 退避期间设置又变了：立即用新设置重试
+                    _ = lan.changed() => {}
+                }
+            }
+            // 设置在设置窗口里改了：停掉旧的（旧 task 被 drop 时 abort、释放 socket），用新设置重新启动
+            _ = lan.changed() => {}
+        }
+    }
+}
+
+/// 按给定的设置启动一次局域网直连 listener，跑到底（服务结束或出错）。
+async fn start_lan_once(status: StatusHub, gate: Arc<DesktopGate>, settings: &LanSettings) {
+    if !settings.enabled {
+        info!("LAN direct path is disabled in the settings");
+        return;
+    }
+    let listen: std::net::SocketAddr = match settings.listen.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            warn!(
+                "config.toml: [lan] listen {:?} isn't a valid address ({e:#}), not listening",
+                settings.listen
+            );
+            return;
+        }
+    };
+    let limiter = Arc::new(airhand_link::lan::Limiter::new(Default::default()));
+    let session: airhand_link::host::lan::LanSession = Arc::new(move |conn| {
+        let gate = gate.clone();
+        Box::pin(async move {
+            let ip = conn.remote_address().ip();
+            session::run_lan(conn, ip, gate).await
+        })
+    });
+    match airhand_link::host::lan::LanHub::start(listen, limiter, session) {
+        Ok((lan_hub, mut task)) => {
+            // 把实际监听的地址写进托盘（监听 0.0.0.0 时是某个具体地址，让用户知道用哪个 IP 连）
+            let addr = lan_hub.local_addr().to_string();
+            status.send_modify(|s| s.host.lan = Some(addr));
+            // 一直跑，直到被控端服务被丢掉（select 的那一端随之结束）
+            let _ = (&mut *task).await;
+        }
+        Err(e) => warn!("can't start the LAN direct path: {e:#}"),
+    }
 }
 
 /// 被控端的状态写进托盘的 [`StatusHub`]，控制码记在 [`HostCode`] 里，并保存在 config.toml 里

@@ -26,7 +26,7 @@
 //!   密钥和配对码加密保存（见 [`secret`]）。
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 
 use airhand_link::LinkConfig;
@@ -34,6 +34,7 @@ use airhand_link::net::{MemoryTrust, Trust, TrustStore, format_fingerprint, pars
 use airhand_link::secure::Identity;
 use airhand_proto::signal::Reclaim;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item};
 use tracing::{error, info, warn};
 
@@ -122,6 +123,53 @@ pub struct Settings {
     pub pause_awdl: bool,
     /// 服务器分配的控制码和加密过的密钥（`[code]`），用 [`Settings::code`] 解开
     saved_code: Option<(i64, String)>,
+    /// 局域网直连：是否监听（`[lan]`，见 [`LanSettings`]）
+    pub lan: LanSettings,
+}
+
+/// 局域网直连（见 `airhand_proto::handshake` 的 `Pattern::Lan` 与 `airhand_link::lan`）。
+/// 被控端在本机监听一个 UDP 端口，控制端输入 `IP:端口 + 账号 + 密码` 直接连上，不经过中转服务器。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanSettings {
+    /// 是否开启局域网直连监听（`enabled`）
+    pub enabled: bool,
+    /// 监听地址（`listen`），默认 `0.0.0.0:4900`
+    pub listen: String,
+    /// 账号（`account`），默认 `admin`
+    pub account: String,
+    /// 由「账号 + 密码」派生的握手 PSK（`psk`，64 位十六进制，见 `airhand_link::lan::psk`）。
+    /// 存 PSK 不存密码：拿到 PSK 也无法反推密码，真正的安全边界是「在线暴力猜密码」，由被控端的限流器防护
+    pub psk: String,
+}
+
+impl Default for LanSettings {
+    fn default() -> Self {
+        LanSettings {
+            enabled: true,
+            listen: "0.0.0.0:4900".to_string(),
+            account: "admin".to_string(),
+            psk: airhand_link::lan::hex(&airhand_link::lan::psk("admin", "admin")),
+        }
+    }
+}
+
+impl LanSettings {
+    /// 这份 LAN 设置下，账号对应的握手 PSK；`enabled` 关了或账号不符时为 `None`。
+    /// 认证读的是"当前生效"的设置（见 [`current_lan`]），不是 [`settings`] 的启动快照——
+    /// 这样设置窗口里改完账号/密码无需重启进程就生效。启动快照里的 LAN 段也可以调本方法，
+    /// 但结果只在设置从未被改过时与当前生效值一致。
+    pub fn psk_for(&self, account: &str) -> Option<[u8; 32]> {
+        if !self.enabled || account != self.account {
+            return None;
+        }
+        match airhand_link::lan::unhex32(&self.psk) {
+            Some(k) => Some(k),
+            None => {
+                warn!("config.toml: [lan] psk isn't 64 hex digits");
+                None
+            }
+        }
+    }
 }
 
 impl Default for Settings {
@@ -136,6 +184,7 @@ impl Default for Settings {
             prevent_sleep: false,
             pause_awdl: false,
             saved_code: None,
+            lan: LanSettings::default(),
         }
     }
 }
@@ -228,6 +277,29 @@ pub fn settings() -> &'static Settings {
     &SETTINGS
 }
 
+/// 当前生效的局域网直连设置。
+///
+/// [`settings`] 是进程启动时读 config.toml 的快照，之后永不更新；但局域网设置可以在运行时改
+/// （[`save_lan`]），而认证（[`crate::host::gate`]）、设置窗口回显、托盘显示都必须读**当前生效**的值，
+/// 否则改完账号/密码/端口后新旧参数都连不上，只能重启进程。这里单独存一份可变的最新值：
+/// 初值取启动快照，`save_lan` 写盘成功后立即同步更新。两种运行模式（本进程被控端、Windows 系统服务
+/// 里的被控端）都经 `save_lan` 保存，所以这份全局在各自进程里都会被更新。
+static CURRENT_LAN: LazyLock<RwLock<LanSettings>> =
+    LazyLock::new(|| RwLock::new(settings().lan.clone()));
+
+/// 当前生效的局域网设置（克隆出来，避免持有读锁跨 `.await`）
+pub fn current_lan() -> LanSettings {
+    CURRENT_LAN
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// 把新保存的局域网设置设为当前生效值（[`save_lan`] 写盘成功后调用）
+pub fn apply_lan(settings: &LanSettings) {
+    *CURRENT_LAN.write().unwrap_or_else(|e| e.into_inner()) = settings.clone();
+}
+
 fn parse(text: &str) -> Result<Settings> {
     let doc: DocumentMut = text.parse()?;
     let mut s = Settings::default();
@@ -265,6 +337,24 @@ fn parse(text: &str) -> Result<Settings> {
         let secret = t.get("secret").and_then(|v| v.as_str());
         if let (Some(code), Some(secret)) = (code, secret) {
             s.saved_code = Some((code, secret.to_string()));
+        }
+    }
+    if let Some(t) = doc.get("lan").and_then(|v| v.as_table_like()) {
+        if let Some(v) = t.get("enabled").and_then(|v| v.as_bool()) {
+            s.lan.enabled = v;
+        }
+        if let Some(v) = t.get("listen").and_then(|v| v.as_str())
+            && !v.trim().is_empty()
+        {
+            s.lan.listen = v.trim().to_string();
+        }
+        if let Some(v) = t.get("account").and_then(|v| v.as_str())
+            && !v.trim().is_empty()
+        {
+            s.lan.account = v.trim().to_string();
+        }
+        if let Some(v) = t.get("psk").and_then(|v| v.as_str()) {
+            s.lan.psk = v.trim().to_string();
         }
     }
     Ok(s)
@@ -553,6 +643,10 @@ fn regenerate(before: Option<&str>) -> Result<DocumentMut> {
             doc[key] = item.clone();
         }
     }
+    // 局域网直连的账号、监听端口：丢了的话用户改过的设置接着用
+    if let Some(item) = old.get("lan").filter(|i| i.is_table()) {
+        doc["lan"] = item.clone();
+    }
     if let Some(item) = old.get("paired").filter(|i| i.is_array_of_tables()) {
         doc["paired"] = item.clone();
     }
@@ -780,6 +874,37 @@ pub fn save_lock_on_end(on: bool) -> Result<()> {
         put_lock_on_end(doc, on);
         Ok(())
     })
+}
+
+/// 保存局域网直连设置（`[lan]`）：账号、监听端口、是否开启（用户在设置里改的）。
+/// `psk` 由「账号 + 密码」派生（见 `airhand_link::lan::psk`），这里只存派生结果，不存密码
+pub fn save_lan(settings: &LanSettings) -> Result<()> {
+    edit(|doc| {
+        put_lan(doc, settings);
+        Ok(())
+    })?;
+    // 写盘成功后立刻更新"当前生效"配置：认证、设置窗口回显、托盘都读它，无需重启进程
+    apply_lan(settings);
+    Ok(())
+}
+
+/// 写入 `[lan]`（模板里没有：默认开启、监听 4900、账号 admin。加上时带一段说明）
+fn put_lan(doc: &mut DocumentMut, s: &LanSettings) {
+    let mut t = toml_edit::Table::new();
+    t["enabled"] = toml_edit::value(s.enabled);
+    t["listen"] = toml_edit::value(&s.listen);
+    t["account"] = toml_edit::value(&s.account);
+    t["psk"] = toml_edit::value(&s.psk);
+    t.decor_mut().set_prefix(format!("\n{}", lan_comment()));
+    doc.insert("lan", Item::Table(t));
+}
+
+/// 写在 `[lan]` 前面的说明
+fn lan_comment() -> String {
+    tr!(
+        "# 局域网直连：被控端在本机监听一个 UDP 端口（listen），同一局域网里的控制端输入 IP:端口 + 账号 + 密码就能直接连上，\n# 不经过中转服务器。psk 是账号密码经 PBKDF2 派生出的握手密钥（64 位十六进制），不是密码本身；改密码要在设置里改。\n",
+        "# LAN direct path: the host listens on a UDP port (listen); a controller on the same network can connect with IP:port + account + password,\n# without the relay server. psk is the handshake key derived from the account+password by PBKDF2 (64 hex digits), not the password itself; change the password in Settings.\n"
+    )
 }
 
 /// 写入 `lock_on_end`（模板里没有：默认锁屏。加上时带一段说明）

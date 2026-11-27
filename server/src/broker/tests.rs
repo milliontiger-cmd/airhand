@@ -87,6 +87,7 @@ fn initiate(code: u32) -> (Initiator, Vec<u8>) {
         me: &me,
         host_key: None,
         pairing: None,
+        lan: None,
         intro: &intro,
     })
     .unwrap()

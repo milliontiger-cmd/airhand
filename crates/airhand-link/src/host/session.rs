@@ -25,7 +25,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use airhand_proto::session::{ByeReason, HostMsg, InputEvent, QualitySettings, StreamView};
-use anyhow::{Result, bail};
+use airhand_proto::SessionLane;
+use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
@@ -261,8 +262,7 @@ where
     F: FnOnce(&Admitted, Senders) -> P,
 {
     let session_id = inc.session_id;
-    let mut kick = inc.kick.clone();
-    let (mut io, admitted) = match HostStreams::open(&inc, video_queue, audio_queue, gate).await {
+    let (io, admitted) = match HostStreams::open(&inc, video_queue, audio_queue, gate).await {
         Ok(r) => r,
         Err(e) => {
             warn!(session_id, "controller not admitted: {e:#}");
@@ -272,6 +272,95 @@ where
     if admitted.admission == Admission::Known {
         info!(session_id, "a known controller connected");
     }
+    finish_and_drive(session_id, admitted, io, inc.kick.clone(), platform).await
+}
+
+/// 局域网直连的一个会话（[`crate::host::lan`]）：与 [`serve`] 的区别只在握手的第一条消息
+/// （[`airhand_proto::handshake::HandshakeInit`]）由控制端写在它自己的控制通道上，这里从 `control_in` 读出来，
+/// 而不是服务器转交。之后完全复用 [`HostStreams::finish`]（把这条直连 QUIC 连接当作中转，`direct` 为 `None`）。
+pub async fn serve_lan<P, F>(
+    conn: quinn::Connection,
+    gate: &dyn Gate,
+    video_queue: usize,
+    audio_queue: usize,
+    platform: F,
+) -> Result<()>
+where
+    P: Platform,
+    F: FnOnce(&Admitted, Senders) -> P,
+{
+    use crate::lanes::{Router, first_stream, open_lane};
+    use crate::secure::ResponderParams;
+    use crate::wire::read_frame;
+    use airhand_proto::handshake::MAX_MSG;
+
+    let session_id = crate::host::lan::LAN_SESSION_ID;
+    // 这条直连连接上只有一个会话：Router 按会话 ID 分发对方的流、数据报
+    let (router, _router_task) = Router::start(&conn);
+    let (mut inbox, registration) = router.register(session_id);
+    // 控制端在自己的控制通道上先写下了握手的第一条消息（HandshakeInit）
+    let mut control_in = first_stream(&mut inbox.control, crate::secure::STEP_TIMEOUT).await?;
+    let mut buf = Vec::new();
+    let got = read_frame(&mut control_in, MAX_MSG, &mut buf)
+        .await
+        .context("the LAN controller didn't send a handshake message")?;
+    anyhow::ensure!(got, "the LAN controller closed before the handshake");
+    let init = buf;
+    // 本端（被控端）的控制通道
+    let mut send = open_lane(&conn, session_id, SessionLane::Control).await?;
+    // 账号密码在握手里认证（`secure::respond` 的 Pattern::Lan 分支）；失败时它已经回了 LanAuthFailed
+    let (r, control_stream) = match crate::secure::respond(
+        &init,
+        &mut send,
+        async { Ok(control_in) },
+        ResponderParams { code: 0, gate },
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(session_id, "a LAN controller was not admitted: {e:#}");
+            // 认证失败：respond 已经把错误写给了控制端。中转由服务器转发（连接一直开着），
+            // 局域网直连的这条连接就是会话连接，马上丢掉会把没写完的错误一起带走。
+            // 等它读完错误并关闭连接（最多 2 秒），再返回。
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), conn.closed()).await;
+            return Err(e);
+        }
+    };
+    let (io, admitted) = HostStreams::finish(
+        session_id,
+        conn,
+        inbox,
+        registration,
+        send,
+        control_stream,
+        r,
+        None,
+        None,
+        video_queue,
+        audio_queue,
+    )
+    .await?;
+    if admitted.admission == Admission::Known {
+        info!(session_id, "a LAN controller connected");
+    }
+    // 局域网直连没有"本机用户断开所有控制端"：给一个永远不会变的 kick 通道
+    let (_kick_tx, kick) = watch::channel(ByeReason::Kicked);
+    finish_and_drive(session_id, admitted, io, kick, platform).await
+}
+
+/// 会话建立之后共同的部分（[`serve`] 与 [`serve_lan`] 共用）：建平台、跑主循环、收尾。
+async fn finish_and_drive<P, F>(
+    session_id: u64,
+    admitted: Admitted,
+    mut io: HostStreams,
+    mut kick: watch::Receiver<ByeReason>,
+    platform: F,
+) -> Result<()>
+where
+    P: Platform,
+    F: FnOnce(&Admitted, Senders) -> P,
+{
     let out = io.out.clone();
     let started = io.started();
     let mut platform = platform(

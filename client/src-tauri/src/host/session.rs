@@ -192,6 +192,28 @@ pub async fn run(inc: Incoming, gate: Arc<DesktopGate>) -> Result<()> {
     result
 }
 
+/// 局域网直连的一个会话（[`airhand_link::host::lan`]）：与 [`run`] 一样，只是握手走局域网直连
+/// （[`airhand_link::host::serve_lan`]），`ip` 是控制端的来源地址。
+pub async fn run_lan(conn: quinn::Connection, ip: std::net::IpAddr, gate: Arc<DesktopGate>) -> Result<()> {
+    let session_id = airhand_link::host::lan::LAN_SESSION_ID;
+    let presence = ending::Slot::default();
+    let slot = presence.clone();
+    let result = airhand_link::host::serve_lan(
+        conn,
+        &*gate,
+        VIDEO_QUEUE,
+        audio::QUEUE,
+        |admitted, senders| {
+            let mut desktop = Desktop::new(session_id, senders, slot);
+            desktop.identity = Some((gate.clone(), ip, admitted.clone()));
+            desktop
+        },
+    )
+    .await;
+    presence.end(result.is_ok());
+    result
+}
+
 /// 桌面版一个会话里的东西
 struct Desktop {
     session_id: u64,

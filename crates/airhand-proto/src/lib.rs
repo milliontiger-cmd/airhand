@@ -52,6 +52,11 @@ pub const SESSION_VERSION: u16 = 1;
 pub const ALPN: &[u8] = b"airhand/1";
 /// 会话内协商的直连 QUIC ALPN。
 pub const DIRECT_ALPN: &[u8] = b"airhand-direct/1";
+/// 局域网直连的 QUIC ALPN：让被控端 listener 区分「中转会话内的直连打洞」与「局域网直连」两种连接。
+pub const LAN_ALPN: &[u8] = b"airhand-lan/1";
+
+/// 局域网直连的 PBKDF2-HMAC-SHA256 迭代次数（见 `airhand_proto::handshake` 的 `Pattern::Lan`），两端一致。
+pub const LAN_PBKDF2_ITER: u32 = 210_000;
 
 /// 控制码范围：6 位数字，首位不为 0。
 pub const CODE_MIN: u32 = 100_000;

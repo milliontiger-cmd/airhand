@@ -59,6 +59,8 @@ pub enum Problem {
     PairingFailed,
     /// 对方现在不接受配对（有人多次输错了配对码，要对方的用户换一个配对码）
     PairingUnavailable,
+    /// 局域网直连：账号或密码不对（不区分，防止探测账号是否存在）
+    LanAuthFailed,
     /// 和对方的协议不兼容（会话版本，或者对方不会本机用的端到端握手模式）。`peer` 比 `ours` 大：要更新本机的 Airhand；
     /// 否则要对方更新。数字只用来比较（会话版本或者握手模式的编号）
     PeerIncompatible { peer: u16, ours: u16 },
@@ -118,6 +120,7 @@ impl Problem {
                 | Problem::PairingRequired
                 | Problem::PairingFailed
                 | Problem::PairingUnavailable
+                | Problem::LanAuthFailed
                 | Problem::PeerIncompatible { .. }
         )
     }
@@ -153,6 +156,9 @@ impl fmt::Display for Problem {
             Problem::PairingFailed => f.write_str("wrong pairing code"),
             Problem::PairingUnavailable => {
                 f.write_str("the host doesn't accept pairing right now (too many wrong codes)")
+            }
+            Problem::LanAuthFailed => {
+                f.write_str("wrong account or password for the LAN connection")
             }
             Problem::PeerIncompatible { peer, ours } => write!(
                 f,

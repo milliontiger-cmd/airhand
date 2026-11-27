@@ -118,6 +118,9 @@ pub const MAX_MSG: usize = 16 * 1024;
 pub const NOISE_KNOWN: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
 pub const NOISE_FIRST: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 pub const NOISE_PAIRING: &str = "Noise_XXpsk3_25519_ChaChaPoly_BLAKE2s";
+/// 局域网直连：`Noise_XXpsk0`——PSK 在握手开始前就由两端各自用「账号 + 密码」派生（见 [`lan_psk`]），
+/// 不随任何握手消息传输。psk0 的 PSK 在 prologue 之前就混进握手哈希，任何一方密码错都会导致认证失败。
+pub const NOISE_LAN: &str = "Noise_XXpsk0_25519_ChaChaPoly_BLAKE2s";
 
 /// SPAKE2 里的两个身份
 pub const PAKE_CONTROLLER: &[u8] = b"airhand controller";
@@ -132,6 +135,8 @@ open_enum! {
         First = 1 => "first",
         /// 带着配对码：SPAKE2 + `Noise_XXpsk3`
         Pairing = 2 => "pairing",
+        /// 局域网直连：账号 + 密码经 PBKDF2 派生后作为 `Noise_XXpsk0` 的 PSK（不经过中转服务器）
+        Lan = 3 => "lan",
     }
 }
 
@@ -142,6 +147,7 @@ impl Pattern {
             Pattern::Known => Some(NOISE_KNOWN),
             Pattern::First => Some(NOISE_FIRST),
             Pattern::Pairing => Some(NOISE_PAIRING),
+            Pattern::Lan => Some(NOISE_LAN),
             Pattern::Unknown(_) => None,
         }
     }
@@ -160,6 +166,11 @@ pub struct HandshakeInit {
     /// Noise 的第 1 条消息
     #[cbor(n(2), with = "minicbor::bytes")]
     pub noise: Vec<u8>,
+    /// 局域网直连（[`Pattern::Lan`]）时的账号。必须是明文：被控端要用它查出该账号存的握手 PSK，
+    /// 才能解开同一条消息里的 `noise`（PSK 在 Noise 的第 1 条消息之前就混进握手哈希了）。
+    /// 账号本身不是秘密（和 SSH 用户名一样）；密码才是秘密，从不上线。非 `Lan` 模式为 `None`
+    #[cbor(n(3), skip_if = "Option::is_none")]
+    pub lan_account: Option<String>,
 }
 
 /// 被控端 → 控制端（握手期间的每一条）
@@ -200,6 +211,8 @@ open_enum! {
         PairingUnavailable = 3 => "pairingUnavailable",
         /// 消息格式不对
         Malformed = 4 => "malformed",
+        /// 局域网直连：账号不存在，或者密码错误（不区分，防止探测账号是否存在）
+        LanAuthFailed = 5 => "lanAuthFailed",
     }
 }
 
@@ -263,6 +276,11 @@ pub fn prologue(init: &HandshakeInit) -> Vec<u8> {
         p.extend_from_slice(&(pake.len() as u32).to_le_bytes());
         p.extend_from_slice(pake);
     }
+    // 局域网直连的账号也绑定进 prologue：中间人换了账号，握手就失败（和篡改噪声消息一样）
+    if let Some(account) = &init.lan_account {
+        p.extend_from_slice(&(account.len() as u32).to_le_bytes());
+        p.extend_from_slice(account.as_bytes());
+    }
     p
 }
 
@@ -290,6 +308,7 @@ mod tests {
             pattern: Pattern::Pairing,
             pake: Some(vec![1, 2, 3]),
             noise: vec![9; 32],
+            lan_account: None,
         };
         let p = prologue(&init);
         let other_noise = HandshakeInit {

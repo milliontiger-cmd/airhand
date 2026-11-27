@@ -60,6 +60,7 @@
 //! 被控端一开始就保持着，本机屏幕不会在重连的间隙露出来。
 
 mod cursor;
+pub mod lan;
 mod link;
 mod queue;
 mod receiver;
@@ -96,7 +97,7 @@ use tracing::{debug, info, warn};
 
 use crate::net::{self, LinkConfig, Reconnect, Report};
 use crate::{Problem, ServerState};
-pub use link::{Established, establish};
+pub use link::{Established, establish, establish_lan};
 pub use receiver::{FromHost, HostReceiver};
 pub use session::{NoticeView, SessionEvent, SessionUi, UiClosed};
 
@@ -169,6 +170,17 @@ pub enum Frontend {
     /// 不管哪种界面，画面都由界面在最后一段（IPC / 网络）之后确认（[`Command::Ack`]），
     /// 被控端的在途帧控制因此把这一段也算进去，这段慢的时候画面不会在中间越积越多。
     Browser,
+}
+
+/// 会话的直连路径怎么建（见 [`session::Direct`]）。
+enum DirectSpec {
+    /// 中转会话：从连服务器的 endpoint 往被控端的候选地址打洞（见 [`crate::direct::controller`]）。
+    Relay {
+        endpoint: Endpoint,
+        observed: std::net::SocketAddr,
+    },
+    /// 局域网直连：本身已是唯一的路，不再打洞。
+    None,
 }
 
 /// 服务器通知：控制码为 `code` 的被控端重新上线了，在等它的会话（[`Problem::HostOffline`]）现在重连
@@ -433,6 +445,7 @@ impl ControllerService {
             me: &self.inner.identity,
             host_key,
             pairing: pairing.as_deref(),
+            lan: None,
             intro: &intro,
         })
         .map_err(Problem::failed)?;
@@ -483,6 +496,84 @@ impl ControllerService {
         let link = establish(&live.router, &live.conn, grant.session_id, initiator)
             .await
             .map_err(|e| Problem::from_error(e, Problem::failed))?;
+        self.finish_session(
+            link,
+            DirectSpec::Relay {
+                endpoint: live.endpoint.clone(),
+                observed: grant.observed,
+            },
+            live.file_limit,
+            airhand_proto::format_code(code),
+            grant.host_name,
+            grant.host_os,
+            Some(grant.resume),
+            ui,
+            frontend,
+        )
+    }
+
+    /// 局域网直连（[`crate::controller::lan`]）：控制端输入 `IP:端口 + 账号 + 密码`，完全不经过中转服务器。
+    ///
+    /// 会话链路与 [`ControllerService::connect`] 完全一样（同一个 [`Established`]），区别只在于：
+    /// * 没有服务器分配的控制码、重连凭证，也不会有中转直连打洞（局域网直连本身就是直连）；
+    /// * 对方的名称、系统、平台由握手后的 `Hello` 报来（[`SessionInfo`] 里先留空，界面在 `hello` 事件里更新）；
+    /// * 剪贴板文件没有中转的大小限制。
+    pub async fn connect_lan(
+        &self,
+        addr: std::net::SocketAddr,
+        account: &str,
+        password: &str,
+        opts: ConnectOptions,
+        ui: Arc<dyn SessionUi>,
+        frontend: Frontend,
+    ) -> Result<SessionInfo, Problem> {
+        // 局域网直连不依赖中转服务器的连接：从本机的一个 endpoint 直接拨号
+        let endpoint = match lan::endpoint() {
+            Ok(e) => e,
+            Err(e) => return Err(Problem::failed(e)),
+        };
+        // 开始时的画质、声音、看哪几个显示器、要不要防窥：和 connect 一样，在端到端握手介绍里交给对方
+        let intro = secure::controller_intro(
+            &self.inner.cfg.name,
+            &self.inner.cfg.os,
+            opts.settings,
+            opts.audio,
+            opts.view,
+            opts.privacy,
+        );
+        let link = lan::connect(&endpoint, addr, account, password, &self.inner.identity, &intro)
+            .await
+            .map_err(|e| Problem::from_error(e, |_| Problem::LanAuthFailed))?;
+        // 直连：局域网直连本身就是唯一的路，不需要（也没有服务器给的 observed 地址）再打洞
+        self.finish_session(
+            link,
+            DirectSpec::None,
+            None,
+            account.to_string(),
+            String::new(),
+            String::new(),
+            None,
+            ui,
+            frontend,
+        )
+    }
+
+    /// 握手完成、链路建好之后共同的部分：开好会话、登记、启动会话任务（[`ControllerService::connect`]
+    /// 和 [`ControllerService::connect_lan`] 共用）。
+    #[allow(clippy::too_many_arguments)]
+    fn finish_session(
+        &self,
+        link: Established,
+        direct: DirectSpec,
+        file_limit: Option<u64>,
+        code: String,
+        host_name: String,
+        host_os: String,
+        resume: Option<ResumeToken>,
+        ui: Arc<dyn SessionUi>,
+        frontend: Frontend,
+    ) -> Result<SessionInfo, Problem> {
+        let session_id = link.session_id;
         let (peer, safety) = (link.peer, link.safety.clone());
         let arrivals = Arc::new(Mutex::new(session::arrivals()));
 
@@ -496,30 +587,41 @@ impl ControllerService {
         };
         let (file_keys, file_streams) = link.files;
         let (files, files_task) = Files::start(
-            grant.session_id,
+            session_id,
             link.paths.clone(),
             file_keys,
-            live.file_limit,
+            file_limit,
             ControllerPeer(Mutex::new(Some((tx.clone(), bulk_tx.clone())))),
             file_streams,
         );
         let remote: Arc<Mutex<Option<RemoteOffer>>> = Arc::default();
         // Ping、画面确认：控制数据报，中转上发、直连通着时直连上也发
         let feedback = Arc::new(session::Feedback::new(link.datagrams));
-        // 直连：等被控端发来候选地址
-        let (offers_tx, offers) = mpsc::channel(4);
-        let answer = tx.clone();
-        let direct = direct::controller::run(direct::controller::Session {
-            endpoint: live.endpoint.clone(),
-            session_id: grant.session_id,
-            observed: grant.observed,
-            paths: link.paths.clone(),
-            feed: link.feed,
-            offers,
-            answer: Box::new(move |offer| {
-                let _ = answer.send(ControllerMsg::Direct(offer));
-            }),
-        });
+        // 直连任务（见 [`DirectSpec`]）：中转会话从连服务器的 endpoint 打洞；局域网直连本身已是直连，任务空转
+        let direct = match direct {
+            DirectSpec::Relay { endpoint, observed } => {
+                let (offers_tx, offers) = mpsc::channel(4);
+                let answer = tx.clone();
+                let paths = link.paths.clone();
+                let feed = link.feed;
+                let task = direct::controller::run(direct::controller::Session {
+                    endpoint,
+                    session_id,
+                    observed,
+                    paths,
+                    feed,
+                    offers,
+                    answer: Box::new(move |offer| {
+                        let _ = answer.send(ControllerMsg::Direct(offer));
+                    }),
+                });
+                session::Direct {
+                    offers: offers_tx,
+                    task: Box::pin(task),
+                }
+            }
+            DirectSpec::None => session::Direct::none(),
+        };
         let (mode, clipboard) = match frontend {
             Frontend::Desktop { clipboard, sync } => {
                 let enabled = Arc::new(AtomicBool::new(sync));
@@ -541,15 +643,14 @@ impl ControllerService {
             arrivals: arrivals.clone(),
             feedback: feedback.clone(),
             paths: link.paths,
-            direct: session::Direct {
-                offers: offers_tx,
-                task: Box::pin(direct),
-            },
-            mic: (grant.session_id, mic_rx, link.mic),
+            direct,
+            mic: (session_id, mic_rx, link.mic),
             files: (files.clone(), files_task),
             remote: remote.clone(),
         };
         let registration = link.registration;
+        // 局域网直连的 Router 任务随会话存活（中转模式这里是 None，见 [`Established::router_task`]）
+        let router_task = link.router_task;
         let inner = self.inner.clone();
         let tx2 = tx.clone();
         // Hold the registry lock until insertion; a fast EOF must not remove a
@@ -558,6 +659,7 @@ impl ControllerService {
         let handle = self.inner.rt.spawn(async move {
             // 会话结束或者被中止时随之注销
             let _registration = registration;
+            let _router_task = router_task;
             session::run(sid, io, tx2, rx).await;
             inner.sessions.lock().unwrap().remove(&sid);
         });
@@ -576,13 +678,13 @@ impl ControllerService {
                 remote,
             },
         );
-        info!(sid, code, host = %grant.host_name, %safety, "session established");
+        info!(sid, code, host = %host_name, %safety, "session established");
         Ok(SessionInfo {
             sid,
-            code: airhand_proto::format_code(code),
-            host_name: grant.host_name,
-            host_os: grant.host_os,
-            resume: grant.resume,
+            code,
+            host_name,
+            host_os,
+            resume: resume.unwrap_or_default(),
             host_key: secure::hex(&peer),
             safety,
         })

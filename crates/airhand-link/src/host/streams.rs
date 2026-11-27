@@ -27,6 +27,7 @@ use airhand_proto::session::{
 use airhand_proto::{MAX_STREAMS, SessionLane};
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
+use quinn::{Connection, RecvStream, SendStream};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
@@ -36,12 +37,14 @@ use super::queue::{self, Outbox};
 use super::session::{Acks, MicSink, Request};
 use super::write::{FrameStreams, Writers, write_all};
 use crate::audio::Unbundler;
-use crate::direct;
+use crate::direct::{self, HostLink};
 use crate::files::Files;
-use crate::lanes::{Via, first_stream, open_lane};
+use crate::lanes::{Inbox, Registration, Via, first_stream, open_lane};
 use crate::merge::Merge;
 use crate::paths::{DatagramSender, Paths};
-use crate::secure::{self, Admission, Gate, Opener, ResponderParams, STEP_TIMEOUT};
+use crate::secure::{
+    self, Admission, Gate, Opener, Responded, ResponderParams, STEP_TIMEOUT,
+};
 use crate::tasks::OwnedTask;
 use crate::transport::{next_msg, open_datagram};
 use airhand_proto::files::FileMsg;
@@ -344,6 +347,39 @@ impl HostStreams {
             },
         )
         .await?;
+        Self::finish(
+            session_id,
+            conn.clone(),
+            inbox,
+            registration,
+            send,
+            control_in,
+            r,
+            inc.direct.as_ref(),
+            inc.file_limit,
+            video_queue,
+            audio_queue,
+        )
+        .await
+    }
+
+    /// 握手回答之后：开本端的通道、建读写任务，返回会话链路和这个控制端（见 [`Admitted`]）。
+    /// 中转和局域网直连（[`crate::host::lan`]）共用：局域网直连把它的 QUIC 连接当作 [`Paths`] 的中转，
+    /// `direct` 为 `None`（没有第二条路）。
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn finish(
+        session_id: u64,
+        conn: Connection,
+        inbox: Inbox,
+        registration: Registration,
+        send: SendStream,
+        control_in: Option<RecvStream>,
+        r: Responded,
+        direct: Option<&HostLink>,
+        file_limit: Option<u64>,
+        video_queue: usize,
+        audio_queue: usize,
+    ) -> Result<(Self, Admitted)> {
         let admitted = Admitted {
             key: r.secured.peer,
             name: r.intro.name.chars().take(64).collect(),
@@ -368,7 +404,7 @@ impl HostStreams {
             "end-to-end session established"
         );
         let mut secured = r.secured;
-        let bulk_send = open_lane(conn, session_id, SessionLane::Bulk).await?;
+        let bulk_send = open_lane(&conn, session_id, SessionLane::Bulk).await?;
         let frames: Vec<Arc<FrameStreams>> =
             (0..secured.video.len()).map(|_| Arc::default()).collect();
         let (out, ctl_rx, bulk_rx) = queue::channel();
@@ -414,11 +450,11 @@ impl HostStreams {
             session_id,
             paths.clone(),
             secured.files,
-            inc.file_limit,
+            file_limit,
             HostPeer(Mutex::new(Some(out.clone()))),
             inbox.files,
         );
-        let direct = inc.direct.as_ref().map(|link| {
+        let direct = direct.map(|link| {
             OwnedTask(tokio::spawn(direct::host::run(direct::host::Session {
                 link: link.clone(),
                 session_id,

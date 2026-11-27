@@ -537,6 +537,17 @@ pub struct Initiated {
     pub sealer: Sealer,
 }
 
+/// 局域网直连的凭据：账号和由「账号 + 密码」经 PBKDF2 派生的 PSK（见 [`crate::lan::psk`]）。
+/// 账号放在加密负载里传给被控端（[`ControllerIntro::lan_account`]），PSK 作为 `Noise_XXpsk0` 的 PSK，
+/// 绝不进明文。
+#[derive(Clone)]
+pub struct LanCredential {
+    /// 账号（也作为 PSK 盐派生的一部分）
+    pub account: String,
+    /// 已经派生的 32 字节 PSK（`PBKDF2(password, SHA-256("airhand lan psk v1" ‖ account), 210_000, 32)`）
+    pub psk: [u8; 32],
+}
+
 /// 控制端怎么证明自己、怎么认被控端
 pub struct InitiatorParams<'a> {
     /// 控制码（配对时算进 SPAKE2 的密码）
@@ -547,6 +558,8 @@ pub struct InitiatorParams<'a> {
     /// 配对码（被控端要求配对、或者对方的身份变了时用户输入的）。带着它就用配对码认对方，
     /// 对方的公钥可以和 `host_key` 不一样（重新配对之后记下新的，见 `airhand_proto::handshake` 的"身份"）
     pub pairing: Option<&'a str>,
+    /// 局域网直连（[`Pattern::Lan`]）：带着它就不走配对/已知公钥，改用账号密码认证
+    pub lan: Option<LanCredential>,
     pub intro: &'a ControllerIntro,
 }
 
@@ -563,10 +576,11 @@ pub struct Initiator {
 /// 控制端：开始握手，返回第一条消息（[`HandshakeInit`] 的 CBOR，放进 `ClientMsg::Connect::init`）。
 /// 接着在控制通道上用 [`Initiator::finish`] 做完
 pub fn initiate(p: InitiatorParams<'_>) -> Result<(Initiator, Vec<u8>)> {
-    let pattern = match (p.pairing, p.host_key) {
-        (Some(_), _) => Pattern::Pairing,
-        (None, Some(_)) => Pattern::Known,
-        (None, None) => Pattern::First,
+    let pattern = match (p.lan.as_ref(), p.pairing, p.host_key) {
+        (Some(_), _, _) => Pattern::Lan,
+        (None, Some(_), _) => Pattern::Pairing,
+        (None, None, Some(_)) => Pattern::Known,
+        (None, None, None) => Pattern::First,
     };
     let pake = p.pairing.map(|code| {
         Spake2::<Ed25519Group>::start_a(
@@ -579,6 +593,7 @@ pub fn initiate(p: InitiatorParams<'_>) -> Result<(Initiator, Vec<u8>)> {
         pattern,
         pake: pake.as_ref().map(|(_, msg)| msg.clone()),
         noise: Vec::new(),
+        lan_account: p.lan.as_ref().map(|l| l.account.clone()),
     };
     let prologue = handshake::prologue(&init);
     let mut builder = snow::Builder::new(noise(pattern)?)
@@ -588,6 +603,10 @@ pub fn initiate(p: InitiatorParams<'_>) -> Result<(Initiator, Vec<u8>)> {
         builder = builder.remote_public_key(k)?;
     }
     let mut hs = builder.build_initiator()?;
+    // 局域网直连：PSK 在握手开始前就由账号密码派生好了，psk0 在 prologue 之前混进握手哈希
+    if let (Pattern::Lan, Some(lan)) = (pattern, &p.lan) {
+        hs.set_psk(0, &lan.psk)?;
+    }
     let intro = framing::to_vec(p.intro);
     let mut msg = noise_buf();
     // IK：介绍放在第 1 条里（加密、认证过）；XX：第 1 条什么都不能带
@@ -716,6 +735,7 @@ fn handshake_problem(e: HandshakeError, pattern: Pattern) -> Problem {
         HandshakeError::UnknownKey if pattern == Pattern::Known => Problem::HostKeyChanged,
         HandshakeError::PairingFailed => Problem::PairingFailed,
         HandshakeError::PairingUnavailable => Problem::PairingUnavailable,
+        HandshakeError::LanAuthFailed => Problem::LanAuthFailed,
         e => Problem::failed(format!("end-to-end handshake failed: {e:?}")),
     }
 }
@@ -740,6 +760,12 @@ pub trait Gate: Send + Sync + 'static {
     }
     /// 这个控制端配对过
     fn is_known(&self, key: &PublicKey) -> bool;
+    /// 局域网直连：账号 `account` 存着的握手 PSK（`PBKDF2(password, salt, iter)` 的结果，见 [`crate::lan`]）。
+    /// `None` 表示账号不存在（[`Pattern::Lan`] 时会被拒，返回 [`HandshakeError::LanAuthFailed`]）。
+    /// 默认不支持局域网直连
+    fn lan_psk(&self, _account: &str) -> Option<[u8; 32]> {
+        None
+    }
 }
 
 /// 被控端为什么让这个控制端进来
@@ -806,6 +832,8 @@ where
     let mut reply = HandshakeReply::default();
     let mut psk = None;
     let mut pairing = None;
+    // 局域网直连：PSK 由「账号 + 密码」派生，握手前就从 `init.lan_account` 查出（psk0，混进握手哈希）
+    let mut lan_psk = None;
     if pattern == Pattern::Pairing {
         let Some(attempt) = p.gate.begin_pairing() else {
             fail(send, HandshakeError::PairingUnavailable).await;
@@ -828,6 +856,16 @@ where
         }
         reply.pake = Some(msg_b);
     }
+    if pattern == Pattern::Lan {
+        // 账号不存在与密码错误统一返回 LanAuthFailed（防账号枚举）：账号不存在时直接拒绝，
+        // 和「密码错」走的是不同的失败点（这里 vs 下面的 read_message），但响应给控制端的错误码相同
+        let account = init.lan_account.as_deref().unwrap_or_default();
+        let Some(k) = p.gate.lan_psk(account) else {
+            fail(send, HandshakeError::LanAuthFailed).await;
+            bail!("unknown LAN account");
+        };
+        lan_psk = Some(k);
+    }
     let prologue = handshake::prologue(&init);
     let mut hs = snow::Builder::new(noise(pattern)?)
         .local_private_key(me.private())?
@@ -836,13 +874,19 @@ where
     if let Some(psk) = &psk {
         hs.set_psk(3, psk)?;
     }
+    if let Some(psk) = &lan_psk {
+        hs.set_psk(0, psk)?;
+    }
     let mut payload = noise_buf();
     let n = match hs.read_message(&init.noise, &mut payload) {
         Ok(n) => n,
         Err(_) => {
-            // IK：控制端记着的不是我们的公钥（我们换过身份，或者它连的根本不是我们）
+            // IK：控制端记着的不是我们的公钥（我们换过身份，或者它连的根本不是我们）；
+            // Lan：账号或密码不对（账号不存在时上面已经拒绝了，这里主要是密码错）
             let e = if pattern == Pattern::Known {
                 HandshakeError::UnknownKey
+            } else if pattern == Pattern::Lan {
+                HandshakeError::LanAuthFailed
             } else {
                 HandshakeError::Malformed
             };
@@ -871,6 +915,10 @@ where
                 fail(send, HandshakeError::PairingFailed).await;
                 bail!("a controller entered a wrong pairing code");
             }
+            Err(_) if pattern == Pattern::Lan => {
+                fail(send, HandshakeError::LanAuthFailed).await;
+                bail!("a controller entered a wrong LAN password");
+            }
             Err(_) => {
                 fail(send, HandshakeError::Malformed).await;
                 bail!("the controller's last handshake message failed authentication");
@@ -893,6 +941,9 @@ where
         None
     } else if pattern == Pattern::Pairing {
         Some(Admission::Paired)
+    } else if pattern == Pattern::Lan {
+        // 局域网直连：PSK 认证通过（账号密码对）即放行，无需配对过的公钥
+        Some(Admission::Known)
     } else if p.gate.is_known(&secured.peer) {
         Some(Admission::Known)
     } else {
@@ -1006,6 +1057,10 @@ mod tests {
         fn is_known(&self, key: &PublicKey) -> bool {
             self.known.lock().unwrap().contains(key)
         }
+        fn lan_psk(&self, account: &str) -> Option<[u8; 32]> {
+            // 测试里：账号 `admin` 的 PSK 由固定密码派生；别的账号不存在
+            (account == "admin").then(|| crate::lan::psk("admin", "admin"))
+        }
     }
 
     struct TestAttempt<'a> {
@@ -1052,6 +1107,7 @@ mod tests {
             me,
             host_key,
             pairing,
+            lan: None,
             intro,
         }
     }
@@ -1294,6 +1350,7 @@ mod tests {
             pattern: Pattern::Unknown(7),
             pake: None,
             noise: vec![1, 2, 3],
+            lan_account: None,
         });
         let h = respond(&init, &mut hw, async { Ok(hr) }, responder(&gate)).await;
         assert!(h.is_err());
@@ -1482,5 +1539,98 @@ mod tests {
         assert_eq!(a.public(), b.public());
         assert_eq!(unhex32(&hex(a.public())), Some(*a.public()));
         assert_eq!(unhex32("zz"), None);
+    }
+
+    // ───────────────────────────── 局域网直连（Pattern::Lan） ─────────────────────────────
+
+    /// 局域网直连的一次握手（[`Pattern::Lan`]）：账号密码对的进得来，密码错、账号不存在都被拒（防账号枚举，
+    /// 统一返回 `LanAuthFailed`）。返回控制端和被控端各自的结果。
+    async fn run_lan(
+        gate: &TestGate,
+        me: &Identity,
+        account: &str,
+        password: &str,
+    ) -> (Result<Initiated>, Result<Responded>) {
+        let ((mut cr, mut cw), (mut hr, mut hw)) = pipes();
+        let intro = test_intro();
+        let lan = LanCredential {
+            account: account.to_string(),
+            psk: crate::lan::psk(account, password),
+        };
+        let (initiator, init) = initiate(InitiatorParams {
+            code: 123_456,
+            me,
+            host_key: None,
+            pairing: None,
+            lan: Some(lan),
+            intro: &intro,
+        })
+        .unwrap();
+        let c = async move { initiator.finish(&mut cr, &mut cw).await };
+        let h = async move {
+            let (mut r, _) = respond(
+                &init,
+                &mut hw,
+                async { Ok(&mut hr) },
+                ResponderParams {
+                    code: 123_456,
+                    gate,
+                },
+            )
+            .await?;
+            // 确认是控制端在控制通道上发的第一帧密文
+            let mut buf = Vec::new();
+            read_frame(&mut hr, 1 << 16, &mut buf).await?;
+            r.opener.open(&mut buf)?;
+            let _: Confirm = framing::decode_known(&buf)?;
+            Ok(r)
+        };
+        tokio::join!(c, h)
+    }
+
+    /// 账号密码对：两边都进得来，密钥、安全码一致，被控端按 `Known` 放行（不要求配对）
+    #[tokio::test]
+    async fn lan_correct_password_admits() {
+        let gate = TestGate::new(None);
+        let me = Identity::generate();
+        let (c, h) = run_lan(&gate, &me, "admin", "admin").await;
+        let (c, h) = (c.unwrap(), h.unwrap());
+        assert_eq!(c.secured.peer, *gate.me.public());
+        assert_eq!(h.secured.peer, *me.public());
+        assert_eq!(c.secured.safety, h.secured.safety);
+        assert_eq!(h.admission, Admission::Known);
+        assert_eq!(h.intro.name, "ctl");
+        // 密钥对得上（控制端发，被控端收）
+        let mut c_send = c.secured.bulk.sealer;
+        let mut h_recv = h.secured.bulk.opener;
+        let mut frame = framing::encode_with_spare(
+            &airhand_proto::session::ControllerMsg::Clipboard {
+                text: "hi".into(),
+            },
+            SEAL_OVERHEAD,
+        );
+        c_send.seal_frame(&mut frame).unwrap();
+        let mut payload = frame[4..].to_vec();
+        h_recv.open(&mut payload).unwrap();
+    }
+
+    /// 密码错：控制端得到 `LanAuthFailed`，被控端也失败
+    #[tokio::test]
+    async fn lan_wrong_password_is_refused() {
+        let gate = TestGate::new(None);
+        let me = Identity::generate();
+        let (c, h) = run_lan(&gate, &me, "admin", "wrong").await;
+        assert_eq!(problem(c), Problem::LanAuthFailed);
+        assert!(h.is_err());
+    }
+
+    /// 账号不存在：和被控端一样的 `LanAuthFailed`（防账号枚举），而不是别的错误
+    #[tokio::test]
+    async fn lan_unknown_account_is_refused() {
+        let gate = TestGate::new(None);
+        let me = Identity::generate();
+        let (c, h) = run_lan(&gate, &me, "nobody", "whatever").await;
+        assert_eq!(problem(c), Problem::LanAuthFailed);
+        assert!(h.is_err());
     }
 }

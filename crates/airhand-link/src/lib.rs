@@ -42,6 +42,8 @@ pub mod flow;
 #[cfg(feature = "client")]
 pub mod host;
 #[cfg(feature = "client")]
+pub mod lan;
+#[cfg(feature = "client")]
 pub mod lanes;
 #[cfg(feature = "client")]
 pub mod merge;

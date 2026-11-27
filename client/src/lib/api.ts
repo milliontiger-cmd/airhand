@@ -97,6 +97,8 @@ export type Problem =
   | { kind: "pairingFailed" }
   /** 对方暂停了配对（有人多次输错配对码） */
   | { kind: "pairingUnavailable" }
+  /** 局域网直连：账号或密码不对（不区分，防止探测账号是否存在） */
+  | { kind: "lanAuthFailed" }
   /** 与对方的会话版本不兼容：peer 比 ours 大要更新本机，否则对方更新 */
   | { kind: "peerIncompatible"; peer: number; ours: number }
   // 会话
@@ -173,6 +175,24 @@ export interface SavedDevice {
  * 带凭证的重连不会被服务器当成猜控制码而限速；对方不在线时回答 hostOffline，对方回来时通知 onHostOnline
  */
 export type ResumeToken = number[];
+
+/** 局域网直连设置（与 Rust 端 config::LanSettings 对应，但只返回能显示的字段，不返回密码/PSK） */
+export interface LanSettings {
+  enabled: boolean;
+  /** 监听地址 `IP:端口`，默认 `0.0.0.0:4900` */
+  listen: string;
+  /** 账号，默认 `admin` */
+  account: string;
+}
+
+/** 保存局域网直连设置时提交的内容：`password` 只在本地派生 PSK，不存密码、不上线 */
+export interface LanSettingsInput {
+  enabled: boolean;
+  listen: string;
+  account: string;
+  password: string;
+}
+
 
 export interface SessionInfo {
   sid: number;
@@ -388,6 +408,19 @@ export interface Backend {
     onEvent: (ev: SessionEvent) => void,
     clipboard: boolean,
   ): Promise<SessionInfo>;
+  /**
+   * 局域网直连：`addr` 是 `IP:端口`，`account` / `password` 是账号密码（密码只在本地派生 PSK，绝不上线）。
+   * 不经过中转服务器，`opts` 里只有画质、声音、显示器、防窥这些开始时的设置有意义（重连凭证、公钥、配对码都不用）
+   */
+  connectLan(
+    addr: string,
+    account: string,
+    password: string,
+    opts: ConnectOptions,
+    view: MediaView,
+    onEvent: (ev: SessionEvent) => void,
+    clipboard: boolean,
+  ): Promise<SessionInfo>;
   /** 在等的被控端（connect 返回过 hostOffline）重新上线了，参数是控制码（数字）。返回取消订阅的函数 */
   onHostOnline(cb: (code: number) => void): () => void;
   /** 对会话的操作（画面的确认由 Worker 在收到画面时自己发） */
@@ -413,6 +446,10 @@ export interface Backend {
   loadDevices(): Promise<SavedDevice[] | null>;
   /** 保存整个列表 */
   saveDevices(devices: SavedDevice[]): Promise<void>;
+  /** 局域网直连设置（桌面版，设置窗口用）。密码不返回（不回显） */
+  lanSettingsLoad(): Promise<LanSettings>;
+  /** 保存局域网直连设置。`password` 只在本地派生 PSK，不存密码、不上线 */
+  lanSettingsSave(s: LanSettingsInput): Promise<void>;
   /**
    * 剪贴板里的文件（见 files.ts）。这里复制的文件（粘贴到画面上、拖到画面上的）公告给被控端，它粘贴时才来取
    * （由 `files` 读）；桌面版的本机剪贴板由 Rust 端自己同步，只有拖放走这里

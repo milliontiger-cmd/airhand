@@ -82,6 +82,32 @@ class WebConsole extends ConsoleLink implements Backend {
     }
   }
 
+  override async connectLan(
+    addr: string,
+    account: string,
+    password: string,
+    opts: ConnectOptions,
+    view: MediaView,
+    onEvent: (ev: SessionEvent) => void,
+    clipboard: boolean,
+  ): Promise<SessionInfo> {
+    const clip: Clip = { sid: null, enabled: clipboard, synced: this.clipSeen };
+    this.clips.add(clip);
+    const events = (ev: SessionEvent) => {
+      if (ev.type === "clipboard") return this.remoteClipboard(clip, ev.text);
+      if (ev.type === "closed") this.clips.delete(clip);
+      onEvent(ev);
+    };
+    try {
+      const info = await super.connectLan(addr, account, password, opts, view, events, clipboard);
+      clip.sid = info.sid;
+      return info;
+    } catch (e) {
+      this.clips.delete(clip);
+      throw e;
+    }
+  }
+
   /** 剪贴板同步的开关在浏览器里 */
   override command(c: Command): Promise<void> {
     if (c.cmd === "clipboardSync") return this.clipboardSync(c.sid, c.enabled);
@@ -214,6 +240,12 @@ class WebConsole extends ConsoleLink implements Backend {
     return null;
   }
   async saveDevices() {}
+
+  // 网页版没有局域网直连设置（设置窗口只在桌面版托盘菜单里）
+  async lanSettingsLoad() {
+    return { enabled: true, listen: "0.0.0.0:4900", account: "admin" };
+  }
+  async lanSettingsSave() {}
 }
 
 export function webBackend(): Backend {

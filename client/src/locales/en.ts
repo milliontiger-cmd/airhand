@@ -78,6 +78,15 @@ const en: Record<MsgKey, Msg> = {
   "connect.pairing": "Pairing code",
   "connect.pairingHint": "The 6-digit pairing code shown on the remote device (in the tray menu on a computer, under Share screen in Airhand on a phone). Once paired, it remembers this computer",
   "connect.customQuality": "Custom quality",
+  "connect.mode": "Connection",
+  "connect.mode.code": "Relay (control code)",
+  "connect.mode.lan": "LAN direct",
+  "connect.lan.hint": "Two computers on the same network can connect without the relay server: enter the IP and port the host listens on, plus its account and password",
+  "connect.lan.addr": "IP address",
+  "connect.lan.port": "Port",
+  "connect.lan.addrHint": "The listening IP shown in the host's Airhand settings; port defaults to 4900, e.g. 192.168.1.10",
+  "connect.lan.account": "Account",
+  "connect.lan.password": "Password",
 
   "devices.title": "My devices",
   "devices.hint": "Computers you connect to are saved here. Click one to connect",
@@ -91,6 +100,21 @@ const en: Record<MsgKey, Msg> = {
   "devices.undo": "Undo",
   "devices.open": "Open",
   "devices.known": "My devices: {name}",
+
+  // LAN direct settings window (opened from the tray menu "LAN direct settings…")
+  "lanSettings.title": "LAN direct settings",
+  "lanSettings.close": "Close",
+  "lanSettings.enabled": "Enable LAN direct path",
+  "lanSettings.listen": "Listen address",
+  "lanSettings.listenHint": "The UDP port this computer listens on, e.g. 0.0.0.0:4900 (0.0.0.0 means all interfaces)",
+  "lanSettings.account": "Account",
+  "lanSettings.password": "Password",
+  "lanSettings.passwordHint": "The password is only used locally to derive a key — never stored or sent. Leave blank to keep the current password",
+  "lanSettings.save": "Save",
+  "lanSettings.saving": "Saving…",
+  "lanSettings.cancel": "Cancel",
+  "lanSettings.accountEmpty": "Account can't be empty",
+  "lanSettings.listenEmpty": "Listen address can't be empty",
 
   "preset.saver": "Data saver",
   "preset.saver.desc": "720p · 24fps · 1.2 Mbps, for mobile networks",
@@ -354,6 +378,7 @@ const en: Record<MsgKey, Msg> = {
   "problem.pairingRequired": "First connection to this device: enter its pairing code, shown on that device (in the Airhand tray menu on a computer, under Share screen in Airhand on a phone)",
   "problem.pairingFailed": "Wrong pairing code, check the one shown on the remote device",
   "problem.pairingUnavailable": "The remote device paused pairing (too many wrong codes): ask its user to pick a new pairing code",
+  "problem.lanAuthFailed": "Wrong account or password for the LAN connection",
   "problem.peerIncompatible": (p) =>
     Number(p.peer) > Number(p.ours)
       ? "Incompatible with the remote computer: it's newer, please update Airhand on this computer"
