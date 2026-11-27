@@ -1204,6 +1204,12 @@ kbd {
   background: rgba(229, 72, 77, 0.14);
   border: 1px solid rgba(229, 72, 77, 0.25);
 }
+/* 保存 LAN 电脑不是危险操作，用蓝色而不是红色 */
+.modal-icon.save-icon {
+  color: #a8b8ff;
+  background: rgba(124, 149, 255, 0.14);
+  border-color: rgba(124, 149, 255, 0.28);
+}
 .modal h3 {
   font-size: 16px;
   margin-bottom: 8px;

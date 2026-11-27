@@ -1,6 +1,14 @@
 // 跨组件的操作：连接、我的设备、重新打开关闭的会话、关闭控制台 / 切换为被控端（先确认）、全屏。
-import { api, toProblem, type QualitySettings, type SavedDevice } from "./api";
+import {
+  api,
+  toProblem,
+  type QualitySettings,
+  type SavedDevice,
+  type SavedLanDevice,
+  type SavedLanDeviceInput,
+} from "./api";
 import * as devices from "./devices";
+import * as lanDevices from "./lan-devices";
 import { OS } from "./platform";
 import { RemoteSession } from "./session";
 import { emptyDraft, store } from "./store";
@@ -63,6 +71,14 @@ export async function openSession(code: string, settings: QualitySettings, opts:
   }
 }
 
+/** 等待用户回答"要不要保存这台 LAN 电脑"的连接：明文凭证只放在这里，不进 store */
+const lanSavePending = new Map<
+  string,
+  { ip: string; port: string; account: string; password: string; s: RemoteSession }
+>();
+/** 已经问过（保存或不保存）的会话：断线重连不再问第二次 */
+const lanSaveDone = new Set<string>();
+
 /** 连接局域网直连的被控端（不经过中转服务器），在新建连接标签里显示进度和错误，连上后这个标签变成会话标签。 */
 export async function openLanSession(
   addr: string,
@@ -75,8 +91,20 @@ export async function openLanSession(
   if (store.get().draft?.busy) return;
   // 局域网直连没有控制码、也不进"我的设备"：code 用一个占位（界面用 hostName / 账号显示标题）
   store.patchDraft({ digits: Array(6).fill(""), busy: true, error: null });
+  const cut = addr.lastIndexOf(":");
+  const ip = cut < 0 ? addr : addr.slice(0, cut);
+  const port = cut < 0 ? "" : addr.slice(cut + 1);
   const s = new RemoteSession(account, settings, undefined, null, { addr, account, password });
   pending = s;
+  const id = lanDevices.lanDeviceId(ip, port);
+  // 已经在列表里的：只刷新最近使用时间等信息，不再问；新电脑：连上后问一次要不要保存
+  const onLanConnected = () => {
+    if (store.get().lanDevices.some((d) => d.id === id)) {
+      rememberLanSession(ip, port, account, password, s);
+      return;
+    }
+    askLanSave(ip, port, account, password, s);
+  };
   try {
     await s.open();
     if (pending !== s) {
@@ -84,13 +112,62 @@ export async function openLanSession(
       return;
     }
     store.add(s);
-    s.onSettingsChange = () => {};
+    if (s.sid !== null) onLanConnected();
+    s.onConnected = onLanConnected;
+    s.onSettingsChange = () =>
+      setLanDevices(lanDevices.patchLanDevice(store.get().lanDevices, id, { quality: s.settings }));
     s.onInputSettingsChange = () => {};
   } catch (e) {
     s.dispose();
     if (pending === s) store.patchDraft({ busy: false, error: toProblem(e) });
   } finally {
     if (pending === s) pending = null;
+  }
+}
+
+/** 连上了一台新电脑：弹窗问用户，选"不保存"就什么都不写 */
+function askLanSave(ip: string, port: string, account: string, password: string, s: RemoteSession) {
+  // 同一个会话断线重连不再重复问；用户拒绝了就是拒绝了
+  if (lanSaveDone.has(s.id) || lanSavePending.has(s.id)) return;
+  lanSavePending.set(s.id, { ip, port, account, password, s });
+  store.setConfirm({ kind: "lanSave", token: s.id, addr: `${ip}:${port}` });
+}
+
+/** 用户点了"保存"：这才把四个连接参数交给 Rust 加密保存 */
+export function confirmLanSave() {
+  const c = store.get().confirm;
+  if (c?.kind !== "lanSave") return;
+  store.setConfirm(null);
+  lanSaveDone.add(c.token);
+  const req = lanSavePending.get(c.token);
+  lanSavePending.delete(c.token);
+  if (req) rememberLanSession(req.ip, req.port, req.account, req.password, req.s);
+}
+
+/** 用户点了"不保存"、按 Esc 或点了遮罩：丢掉暂存的明文，不写盘 */
+export function dismissLanSave() {
+  const c = store.get().confirm;
+  if (c?.kind === "lanSave") {
+    lanSaveDone.add(c.token);
+    lanSavePending.delete(c.token);
+  }
+  store.setConfirm(null);
+}
+
+/**
+ * 点"局域网直连"列表里的一台：只取回这一台的明文连接参数（账号密码不进列表状态），然后照常连接。
+ */
+export async function openSavedLanDevice(d: SavedLanDevice, settings: QualitySettings): Promise<void> {
+  if (!store.get().draft) store.newTab();
+  if (store.get().draft?.busy) return;
+  store.patchDraft({ mode: "lan", error: null });
+  try {
+    const c = await api.lanDeviceCredentials(d.id);
+    if (store.get().draft?.busy) return;
+    // 明文只交给会话和加密保存，不回填到输入框（界面上账号密码始终是遮罩）
+    await openLanSession(`${c.addr.trim()}:${c.port.trim()}`, c.account, c.password, d.quality ?? settings);
+  } catch (e) {
+    store.patchDraft({ busy: false, error: toProblem(e) });
   }
 }
 
@@ -128,24 +205,69 @@ export async function loadDevices() {
   const now = store.get().devices;
   const merged = list ? devices.sortDevices([...now, ...list.filter((d) => !now.some((x) => x.code === d.code))]) : now;
   store.setDevices(merged.slice(0, devices.MAX_DEVICES), list !== null);
-  if (list && now.length > 0) saveDevices();
+  if (list && now.length > 0) scheduleSave("devices");
+}
+
+/** 读出保存的 LAN 电脑（打开控制台时） */
+export async function loadLanDevices() {
+  const list = await api.loadLanDevices().catch((e) => {
+    console.warn("can't load the saved LAN computers", e);
+    return null;
+  });
+  const now = store.get().lanDevices;
+  const merged = list
+    ? lanDevices.sortLanDevices([...now, ...list.filter((d) => !now.some((x) => x.id === d.id))])
+    : now;
+  store.setLanDevices(merged.slice(0, lanDevices.MAX_LAN_DEVICES), list !== null);
+  if (list && now.length > 0) scheduleSave("lan");
 }
 
 /** 保存：一次只存一份，存的时候取最新的列表（连续几次变化只存最后一次，也不会旧的盖掉新的） */
 let saving: Promise<void> = Promise.resolve();
-let dirty = false;
+let dirtyDevices = false;
+let dirtyLan = false;
 /** 还没存完的次数 */
 let unsaved = 0;
+/** 刚连上的电脑的明文账号密码：只在内存里待到 Rust 加密写盘为止，不进 React 状态 */
+const pendingLanSecrets = new Map<string, { account: string; password: string }>();
 
-function saveDevices() {
-  if (!store.get().devicesSaved) return;
-  dirty = true;
+function scheduleSave(which: "devices" | "lan") {
+  if (which === "devices" && !store.get().devicesSaved) return;
+  if (which === "lan" && !store.get().lanDevicesSaved) return;
+  if (which === "devices") dirtyDevices = true;
+  else dirtyLan = true;
   unsaved++;
   saving = saving.then(async () => {
     try {
-      if (!dirty) return;
-      dirty = false;
-      await api.saveDevices(store.get().devices).catch((e) => console.warn("can't save the devices", e));
+      if (dirtyDevices) {
+        dirtyDevices = false;
+        await api.saveDevices(store.get().devices).catch((e) => console.warn("can't save the devices", e));
+      }
+      if (dirtyLan) {
+        dirtyLan = false;
+        const inputs: SavedLanDeviceInput[] = store.get().lanDevices.map((d) => ({
+          id: d.id,
+          addr: d.addr,
+          port: d.port,
+          // 空串 = 沿用文件里已加密保存的值（列表里只有遮罩）
+          account: pendingLanSecrets.get(d.id)?.account ?? "",
+          password: pendingLanSecrets.get(d.id)?.password ?? "",
+          alias: d.alias,
+          name: d.name,
+          os: d.os,
+          lastUsed: d.lastUsed,
+          quality: d.quality,
+        }));
+        const sent = inputs.filter((d) => d.account || d.password).map((d) => d.id);
+        let ok = true;
+        await api
+          .saveLanDevices(inputs)
+          .catch((e) => {
+            ok = false;
+            console.warn("can't save the LAN computers", e);
+          });
+        if (ok) for (const id of sent) pendingLanSecrets.delete(id);
+      }
     } finally {
       unsaved--;
     }
@@ -155,7 +277,32 @@ function saveDevices() {
 function setDevices(list: SavedDevice[]) {
   if (list === store.get().devices) return;
   store.setDevices(list);
-  saveDevices();
+  scheduleSave("devices");
+}
+
+function setLanDevices(list: SavedLanDevice[]) {
+  if (list === store.get().lanDevices) return;
+  store.setLanDevices(list);
+  scheduleSave("lan");
+}
+
+/** 连上 LAN 电脑：记到"局域网直连"页最下面，四个连接参数交给 Rust 加密保存 */
+function rememberLanSession(
+  ip: string,
+  port: string,
+  account: string,
+  password: string,
+  s: RemoteSession,
+) {
+  const id = lanDevices.lanDeviceId(ip, port);
+  pendingLanSecrets.set(id, { account, password });
+  setLanDevices(
+    lanDevices.rememberLan(
+      store.get().lanDevices,
+      { id, addr: ip, port, name: s.hostName, os: s.hostOs, quality: s.settings },
+      Date.now(),
+    ),
+  );
 }
 
 /** 连上了：记下这台电脑（名字、系统、重连凭证、画质、鼠标模式、时间） */
@@ -188,6 +335,12 @@ export const renameDevice = (code: string, name: string) =>
 export const forgetDevice = (code: string) => setDevices(devices.forgetDevice(store.get().devices, code));
 export const restoreDevice = (d: SavedDevice) => setDevices(devices.restoreDevice(store.get().devices, d));
 
+export const renameLanDevice = (id: string, name: string) =>
+  setLanDevices(lanDevices.renameLanDevice(store.get().lanDevices, id, name));
+export const forgetLanDevice = (id: string) => setLanDevices(lanDevices.forgetLanDevice(store.get().lanDevices, id));
+export const restoreLanDevice = (d: SavedLanDevice) =>
+  setLanDevices(lanDevices.restoreLanDevice(store.get().lanDevices, d));
+
 /** 等正在保存的存完（关闭控制台之前） */
 const devicesSaved = () => Promise.race([saving, new Promise((r) => setTimeout(r, 1500))]);
 
@@ -214,6 +367,8 @@ const activeSessions = () => store.get().sessions.filter((s) => s.state !== "clo
 export function allowClose(): boolean {
   const n = activeSessions();
   if (n > 0) {
+    // 上一个"要不要保存 LAN 电脑"的询问作废，明文凭证也一起丢掉
+    dismissLanSave();
     store.setConfirm({ kind: "close", sessions: n });
     return false;
   }
@@ -229,6 +384,7 @@ export function allowClose(): boolean {
 export function requestToHost() {
   const n = activeSessions();
   if (n === 0) return void quit("toHost");
+  dismissLanSave();
   store.setConfirm({ kind: "toHost", sessions: n });
 }
 

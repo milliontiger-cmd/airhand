@@ -6,7 +6,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { Backend, PopoutFrames, SavedDevice, WindowFrame } from "../api";
+import type {
+  Backend,
+  LanCredentials,
+  PopoutFrames,
+  SavedDevice,
+  SavedLanDevice,
+  SavedLanDeviceInput,
+  WindowFrame,
+} from "../api";
 import { ConsoleLink } from "../console";
 import type { Lang } from "../i18n";
 
@@ -67,6 +75,18 @@ class DesktopConsole extends ConsoleLink implements Backend {
 
   saveDevices(devices: SavedDevice[]) {
     return invoke<void>("devices_save", { devices });
+  }
+
+  loadLanDevices() {
+    return invoke<SavedLanDevice[]>("lan_devices_load");
+  }
+
+  saveLanDevices(devices: SavedLanDeviceInput[]) {
+    return invoke<void>("lan_devices_save", { devices });
+  }
+
+  lanDeviceCredentials(id: string) {
+    return invoke<LanCredentials>("lan_device_credentials", { id });
   }
 
   lanSettingsLoad() {

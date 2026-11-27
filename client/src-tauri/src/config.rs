@@ -654,6 +654,10 @@ fn regenerate(before: Option<&str>) -> Result<DocumentMut> {
     if let Some(item) = old.get("device").filter(|i| i.is_array_of_tables()) {
         doc["device"] = item.clone();
     }
+    // 局域网直连里连接过的电脑（四项目连接参数都是加密的，丢了就再也连不上）
+    if let Some(item) = old.get("lanDevice").filter(|i| i.is_array_of_tables()) {
+        doc["lanDevice"] = item.clone();
+    }
     Ok(doc)
 }
 
@@ -1049,6 +1053,52 @@ fn put_devices(doc: &mut DocumentMut, list: &[crate::devices::Device]) {
     }
 }
 
+/// 保存控制台"局域网直连"页里连接过的电脑：整个列表换成 `list`（已经由 [`crate::lan_devices::for_file`] 加密）。
+pub fn save_lan_devices(list: &[crate::lan_devices::SealedLanDevice]) -> Result<()> {
+    edit(|doc| {
+        put_lan_devices(doc, list);
+        Ok(())
+    })
+}
+
+fn put_lan_devices(doc: &mut DocumentMut, list: &[crate::lan_devices::SealedLanDevice]) {
+    let mut arr = toml_edit::ArrayOfTables::new();
+    for t in list
+        .iter()
+        .take(crate::lan_devices::MAX_IN_FILE)
+        .filter_map(crate::lan_devices::to_table)
+    {
+        arr.push(t);
+    }
+    if let Some(first) = arr.get_mut(0) {
+        first
+            .decor_mut()
+            .set_prefix(format!("\n{}", lan_devices_comment()));
+    }
+    doc.remove("lanDevice");
+    if !arr.is_empty() {
+        doc.insert("lanDevice", Item::ArrayOfTables(arr));
+    }
+}
+
+/// 写在第一台 LAN 电脑前面的说明
+fn lan_devices_comment() -> String {
+    #[cfg(windows)]
+    let how = tr!(
+        "addr、port、account、password 都用你的 Windows 账户加密（DPAPI），别的账户、别的电脑解不开；id 是 IP:端口 的散列，不写明文地址。",
+        "addr, port, account and password are encrypted with your Windows account (DPAPI); other accounts and computers can't read them. id is a hash of IP:port, not the address in clear."
+    );
+    #[cfg(not(windows))]
+    let how = tr!(
+        "addr、port、account、password 都经过编码，只有本账户能读写这个文件（权限 600）；id 是 IP:端口 的散列。",
+        "addr, port, account and password are encoded; only your account can read this file (mode 600). id is a hash of IP:port."
+    );
+    tr!(
+        "# 局域网直连：连接过的电脑，自动保存在这里（\"新建连接 → 局域网直连\"页的最下面，最多 50 台）。\n# {how}\n",
+        "# LAN direct: computers you have connected to, saved automatically at the bottom of the \"New connection → LAN direct\" page (up to 50).\n# {how}\n"
+    )
+}
+
 // ───────────────────────────── 端到端加密的身份和配对 ─────────────────────────────
 
 pub use airhand_link::host::{Paired, PairingState};
@@ -1287,6 +1337,8 @@ pub(crate) mod secret {
         Pairing,
         /// 控制台的身份密钥（Windows：用户的 DPAPI）
         ControllerKey,
+        /// "局域网直连"里保存的 IP、端口、账号、密码（Windows：用户的 DPAPI）
+        LanDevice,
     }
 
     #[cfg(windows)]
@@ -1295,6 +1347,7 @@ pub(crate) mod secret {
             Kind::HostKey => b"airhand host identity v1",
             Kind::Pairing => b"airhand pairing code v1",
             Kind::ControllerKey => b"airhand console identity v1",
+            Kind::LanDevice => b"airhand saved lan device v1",
         }
     }
 
@@ -1364,6 +1417,16 @@ pub(crate) mod secret {
         {
             bail!("{text:?} isn't a control code")
         }
+    }
+
+    /// "局域网直连"保存的 IP / 端口 / 账号 / 密码写进文件之前（macOS / Linux 原样编码）
+    pub fn seal_lan(text: &str) -> Result<String> {
+        seal_bytes(text.as_bytes(), Kind::LanDevice)
+    }
+
+    /// 解开加密保存的 LAN 连接参数
+    pub fn open_lan(text: &str) -> Result<String> {
+        String::from_utf8(open_bytes(text, Kind::LanDevice)?).map_err(Into::into)
     }
 
     #[cfg(windows)]
@@ -1745,6 +1808,40 @@ mod tests {
         put_devices(&mut doc, &[]);
         assert!(!doc.to_string().contains("[[device]]"));
         assert!(doc.to_string().contains("[code]"));
+    }
+
+    /// "局域网直连"保存的电脑写在 [[lanDevice]]，四项连接参数不落明文，文件删掉重建后还在
+    #[test]
+    fn lan_devices_in_the_file_and_survive_regeneration() {
+        let mut doc: DocumentMut = template().parse().unwrap();
+        let d = crate::lan_devices::LanDevice {
+            id: String::new(),
+            addr: "192.168.1.10".into(),
+            port: "4900".into(),
+            account: "admin".into(),
+            password: "s3cret".into(),
+            alias: None,
+            name: "DESIGN-WS".into(),
+            os: "Windows 11".into(),
+            last_used: 1_762_597_230_000,
+            quality: None,
+        };
+        let sealed = crate::lan_devices::for_file(vec![d]).unwrap();
+        put_lan_devices(&mut doc, &sealed);
+        let text = doc.to_string();
+        assert_eq!(text.matches("[[lanDevice]]").count(), 1);
+        assert!(!text.contains("192.168.1.10"));
+        assert!(!text.contains("s3cret"));
+        assert_eq!(
+            crate::lan_devices::entries(&text.parse().unwrap()),
+            sealed
+        );
+        let again = regenerate(Some(&text)).unwrap().to_string();
+        assert_eq!(
+            crate::lan_devices::entries(&again.parse().unwrap()),
+            sealed
+        );
+        assert_eq!(parse(&again).unwrap(), Settings::default());
     }
 
     /// 文件被删掉后重新生成：服务器等设置回到默认，控制码、开机自动启动、我的设备接着用

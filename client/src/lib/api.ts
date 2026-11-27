@@ -171,6 +171,48 @@ export interface SavedDevice {
 }
 
 /**
+ * "局域网直连"里保存过的一台电脑（与 Rust 端 `lan_devices::LanDeviceView` 对应，保存在 config.toml 的 `[[lanDevice]]`）。
+ * IP 和端口明文显示；账号、密码由后端遮住，明文不进列表状态。
+ */
+export interface SavedLanDevice {
+  /** IP:端口 的散列，后端生成 */
+  id: string;
+  addr: string;
+  port: string;
+  /** 遮罩后的账号（••••••） */
+  accountMasked: string;
+  /** 遮罩后的密码（••••••） */
+  passwordMasked: string;
+  alias: string | null;
+  name: string;
+  os: string;
+  lastUsed: number;
+  quality: QualitySettings | null;
+}
+
+/** 保存整个 LAN 设备列表时提交的一项。account/password 传空串 = 沿用已存的值（界面上只有遮罩） */
+export interface SavedLanDeviceInput {
+  id: string;
+  addr: string;
+  port: string;
+  account: string;
+  password: string;
+  alias: string | null;
+  name: string;
+  os: string;
+  lastUsed: number;
+  quality: QualitySettings | null;
+}
+
+/** 点击保存的电脑时单独取回的连接参数（Rust 端解密后返回） */
+export interface LanCredentials {
+  addr: string;
+  port: string;
+  account: string;
+  password: string;
+}
+
+/**
  * 重连凭证（与 airhand_proto::signal::ResumeToken 对应，16 个字节）：连上时得到，会话断了之后重连时原样带上。
  * 带凭证的重连不会被服务器当成猜控制码而限速；对方不在线时回答 hostOffline，对方回来时通知 onHostOnline
  */
@@ -446,6 +488,12 @@ export interface Backend {
   loadDevices(): Promise<SavedDevice[] | null>;
   /** 保存整个列表 */
   saveDevices(devices: SavedDevice[]): Promise<void>;
+  /** "局域网直连"里连接过的电脑。返回 null 表示不能保存（网页版：只在本页面的内存里） */
+  loadLanDevices(): Promise<SavedLanDevice[] | null>;
+  /** 保存整个 LAN 电脑列表（四个连接参数由 Rust 端加密存储） */
+  saveLanDevices(devices: SavedLanDeviceInput[]): Promise<void>;
+  /** 按 id 取回一台 LAN 电脑的明文连接参数（只在用户点击连接时调用） */
+  lanDeviceCredentials(id: string): Promise<LanCredentials>;
   /** 局域网直连设置（桌面版，设置窗口用）。密码不返回（不回显） */
   lanSettingsLoad(): Promise<LanSettings>;
   /** 保存局域网直连设置。`password` 只在本地派生 PSK，不存密码、不上线 */

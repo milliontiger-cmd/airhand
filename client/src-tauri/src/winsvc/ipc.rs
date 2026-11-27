@@ -79,6 +79,10 @@ pub enum ToAgent {
     SaveDevices {
         devices: Vec<crate::devices::Device>,
     },
+    /// 控制台的"局域网直连"里连接过的电脑：四个连接参数已经由那个用户加密，整个列表写进 config.toml
+    SaveLanDevices {
+        devices: Vec<crate::lan_devices::SealedLanDevice>,
+    },
     /// 换一个配对码（暂停了的配对随之恢复）
     NewPairingCode,
     /// 忘掉所有配对过的控制端
@@ -318,6 +322,17 @@ async fn handle(msg: ToAgent, agent: &Agent, hub: &StatusHub) {
                 Ok(Ok(())) => debug!(n, "saved the devices"),
                 Ok(Err(e)) => warn!("can't save the devices: {e:#}"),
                 Err(e) => warn!("can't save the devices: {e}"),
+            }
+        }
+        ToAgent::SaveLanDevices { devices } => {
+            // 只改 [[lanDevice]]，每一项写之前再检查一遍（见 lan_devices::to_table）
+            let n = devices.len();
+            let r = tokio::task::spawn_blocking(move || crate::config::save_lan_devices(&devices))
+                .await;
+            match r {
+                Ok(Ok(())) => debug!(n, "saved the LAN devices"),
+                Ok(Err(e)) => warn!("can't save the LAN devices: {e:#}"),
+                Err(e) => warn!("can't save the LAN devices: {e}"),
             }
         }
     }

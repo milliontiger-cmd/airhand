@@ -67,6 +67,11 @@ export default {
   "confirm.toHost.title": "切换为被控端？",
   "confirm.toHost.body": "将断开 {n} 个远程连接并关闭控制台。",
   "confirm.toHost.ok": "断开并切换",
+  // LAN 连上之后问要不要保存到页面最下面
+  "confirm.lanSave.title": "保存这台局域网电脑？",
+  "confirm.lanSave.body": "已连接 {addr}。保存后下次点一下就能连上；IP、端口、账号和密码都会加密存储。",
+  "confirm.lanSave.ok": "保存",
+  "confirm.lanSave.no": "不保存",
   "confirm.cancel": "取消",
 
   // 新建连接
@@ -106,6 +111,16 @@ export default {
   "devices.undo": "撤销",
   "devices.open": "已打开",
   "devices.known": "我的设备：{name}",
+
+  // 局域网直连页里连接过的电脑（最下面那一栏）
+  "lanDevices.title": "局域网直连电脑",
+  "lanDevices.hint": "连接成功后可选择保存到这里，点一下就连（账号密码已加密保存）",
+  "lanDevices.hintWeb": "网页版不保存，刷新页面后清空",
+  "lanDevices.empty": "连接成功后选择保存，电脑就会显示在这里，下次点一下就能连上",
+  "lanDevices.search": "搜索名称或 IP",
+  "lanDevices.removed": "已移除 {name}",
+  "lanDevices.account": "账号",
+  "lanDevices.password": "密码",
 
   // 局域网直连设置窗口（托盘菜单"局域网直连设置…"打开）
   "lanSettings.title": "局域网直连设置",

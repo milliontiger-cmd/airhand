@@ -25,6 +25,7 @@ mod console;
 mod devices;
 #[cfg(test)]
 mod e2e;
+mod lan_devices;
 mod ephemeral;
 mod fullscreen;
 pub mod host;
@@ -765,6 +766,56 @@ async fn lan_settings_save(
     Ok(saved)
 }
 
+/// "局域网直连"页里保存过的电脑：IP/端口明文，账号/密码遮住（真正的明文在点击连接时才取）
+#[tauri::command]
+async fn lan_devices_load() -> Vec<lan_devices::LanDeviceView> {
+    let list = tauri::async_runtime::spawn_blocking(lan_devices::load)
+        .await
+        .unwrap_or_default();
+    list.iter().map(lan_devices::LanDeviceView::from).collect()
+}
+
+/// 保存"局域网直连"里连接过的电脑（控制台传来整个列表，四个连接参数会先加密再写盘）。
+#[tauri::command]
+#[cfg_attr(not(windows), allow(unused_variables))]
+async fn lan_devices_save(
+    state: tauri::State<'_, AppState>,
+    devices: Vec<lan_devices::LanDevice>,
+) -> Result<(), Problem> {
+    let list = tauri::async_runtime::spawn_blocking(move || lan_devices::for_file(devices))
+        .await
+        .map_err(Problem::failed)?
+        .map_err(|e| Problem::failed(format!("{e:#}")))?;
+    // Windows 安装版：配置在安装目录里，由服务里的被控端维护（托盘没有写权限）
+    #[cfg(windows)]
+    if state.service_mode {
+        let connected = state.hub.borrow().service.is_some_and(|s| s.connected);
+        let sv = state.services.lock().unwrap();
+        return match &sv.host {
+            Some(Hosting::Service(link)) if connected => {
+                link.send(winsvc::ipc::ToAgent::SaveLanDevices { devices: list });
+                Ok(())
+            }
+            _ => Err(Problem::failed(
+                "the Airhand service isn't reachable from this session",
+            )),
+        };
+    }
+    tauri::async_runtime::spawn_blocking(move || config::save_lan_devices(&list))
+        .await
+        .map_err(Problem::failed)?
+        .map_err(|e| Problem::failed(format!("{e:#}")))
+}
+
+/// 点保存的电脑时取回明文连接参数（只给这一台，不给整个列表）
+#[tauri::command]
+async fn lan_device_credentials(id: String) -> Result<lan_devices::LanCredentials, Problem> {
+    tauri::async_runtime::spawn_blocking(move || lan_devices::credentials(&id))
+        .await
+        .map_err(Problem::failed)?
+        .ok_or_else(|| Problem::failed("this saved LAN computer no longer exists"))
+}
+
 /// 控制台切换界面语言
 #[tauri::command]
 fn set_language(app: AppHandle, lang: Lang) {
@@ -964,6 +1015,9 @@ pub fn run() {
             switch_to_host,
             devices_load,
             devices_save,
+            lan_devices_load,
+            lan_devices_save,
+            lan_device_credentials,
             lan_settings_load,
             lan_settings_save,
         ])

@@ -2,7 +2,15 @@
 // "我的设备"保存在 config.toml 里（见 actions.ts 的 saveDevices）；画面增强、本地光标是这台电脑自己显示的偏好，
 // 和对方无关，存在 WebView / 浏览器的 localStorage 里；其余只在控制台打开期间有效。
 import { useCallback, useSyncExternalStore } from "react";
-import type { AppInfo, Codec, Problem, QualitySettings, SavedDevice, ServerState } from "./api";
+import type {
+  AppInfo,
+  Codec,
+  Problem,
+  QualitySettings,
+  SavedDevice,
+  SavedLanDevice,
+  ServerState,
+} from "./api";
 import { fmtCode } from "./devices";
 import { ENHANCE_LEVELS, type EnhanceLevel } from "./enhance";
 import { DEFAULT_PRESET, type PresetId } from "./presets";
@@ -33,8 +41,14 @@ export interface Recent {
   settings: QualitySettings;
 }
 
-/** 等用户确认的操作：关闭控制台 / 切换为被控端都会断开所有会话 */
-export type Confirm = null | { kind: "close" | "toHost"; sessions: number };
+/**
+ * 等用户确认的操作：关闭控制台 / 切换为被控端都会断开所有会话；
+ * lanSave 是 LAN 连上后问要不要保存这台电脑，明文凭证留在 actions.ts 里，不进 store
+ */
+export type Confirm =
+  | null
+  | { kind: "close" | "toHost"; sessions: number }
+  | { kind: "lanSave"; token: string; addr: string };
 
 interface State {
   /** 顺序就是标签的顺序 */
@@ -47,6 +61,10 @@ interface State {
   devices: SavedDevice[];
   /** 我的设备能不能保存（桌面版：config.toml）；网页版只在本页面的内存里 */
   devicesSaved: boolean;
+  /** 局域网直连里连接过的电脑（IP/端口明文，账号/密码是遮罩） */
+  lanDevices: SavedLanDevice[];
+  /** LAN 电脑能不能保存（桌面版：config.toml 加密存储；网页版：只在本页面的内存里） */
+  lanDevicesSaved: boolean;
   confirm: Confirm;
   server: ServerState;
   /**
@@ -115,6 +133,8 @@ let state: State = {
   recent: [],
   devices: [],
   devicesSaved: false,
+  lanDevices: [],
+  lanDevicesSaved: false,
   confirm: null,
   server: { state: "connecting" },
   serverProblem: null,
@@ -260,6 +280,8 @@ export const store = {
     if (v) store.setView(v);
   },
   setDevices: (devices: SavedDevice[], saved = state.devicesSaved) => set({ devices, devicesSaved: saved }),
+  setLanDevices: (lanDevices: SavedLanDevice[], saved = state.lanDevicesSaved) =>
+    set({ lanDevices, lanDevicesSaved: saved }),
 
   setConfirm: (confirm: Confirm) => set({ confirm }),
 };

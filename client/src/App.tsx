@@ -7,7 +7,7 @@ import { Popouts } from "./components/PopoutView";
 import { SessionView } from "./components/SessionView";
 import { TitleBar } from "./components/TitleBar";
 import { WebUnsupported, webUnsupported } from "./components/WebUnsupported";
-import { allowClose, applyFullscreen, closeTab, loadDevices, reopenLast } from "./lib/actions";
+import { allowClose, applyFullscreen, closeTab, loadDevices, loadLanDevices, reopenLast } from "./lib/actions";
 import { api } from "./lib/api";
 import { supportedDecoders } from "./lib/codec";
 import { setLang, useLang } from "./lib/i18n";
@@ -65,6 +65,7 @@ function Console() {
     });
     void api.serverStatus().then(store.setServer);
     void loadDevices();
+    void loadLanDevices();
     void supportedDecoders().then(store.setDecoders);
     const unStatus = api.onServerStatus(store.setServer);
     const unOnline = api.onHostOnline(store.hostOnline);

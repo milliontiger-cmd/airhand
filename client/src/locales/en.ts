@@ -64,6 +64,11 @@ const en: Record<MsgKey, Msg> = {
   "confirm.toHost.body": (p) =>
     `${p.n} remote ${plural(p.n, "connection", "connections")} will be disconnected and the console will close.`,
   "confirm.toHost.ok": "Disconnect and switch",
+  "confirm.lanSave.title": "Save this LAN computer?",
+  "confirm.lanSave.body":
+    "Connected to {addr}. Save it to connect with one click next time; the IP, port, account and password are stored encrypted.",
+  "confirm.lanSave.ok": "Save",
+  "confirm.lanSave.no": "Don't save",
   "confirm.cancel": "Cancel",
 
   "connect.title": "Connect to a remote computer",
@@ -100,6 +105,17 @@ const en: Record<MsgKey, Msg> = {
   "devices.undo": "Undo",
   "devices.open": "Open",
   "devices.known": "My devices: {name}",
+
+  // LAN direct: computers connected before, shown at the bottom of the LAN page
+  "lanDevices.title": "LAN computers",
+  "lanDevices.hint":
+    "Choose to save a computer after connecting, then click it to connect next time (account and password stored encrypted)",
+  "lanDevices.hintWeb": "Not saved in the web console: cleared when the page reloads",
+  "lanDevices.empty": "Saved LAN computers appear here. Click one to connect next time",
+  "lanDevices.search": "Search by name or IP",
+  "lanDevices.removed": "Removed {name}",
+  "lanDevices.account": "Account",
+  "lanDevices.password": "Password",
 
   // LAN direct settings window (opened from the tray menu "LAN direct settings…")
   "lanSettings.title": "LAN direct settings",

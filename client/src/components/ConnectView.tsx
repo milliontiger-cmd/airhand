@@ -2,9 +2,22 @@
 //
 // 输入的内容放在 store 里（Draft），切到别的标签再回来时还在。
 import { useEffect, useRef, useState } from "react";
-import type { SavedDevice } from "../lib/api";
-import { fmtCode, forgetDevice, openLanSession, openSession, renameDevice, resetDraft, restoreDevice } from "../lib/actions";
+import type { SavedDevice, SavedLanDevice } from "../lib/api";
+import {
+  fmtCode,
+  forgetDevice,
+  forgetLanDevice,
+  openLanSession,
+  openSavedLanDevice,
+  openSession,
+  renameDevice,
+  renameLanDevice,
+  resetDraft,
+  restoreDevice,
+  restoreLanDevice,
+} from "../lib/actions";
 import { deviceTitle, matchDevice, relativeTime } from "../lib/devices";
+import { lanAddr, lanTitle, matchLanDevice } from "../lib/lan-devices";
 import { getLang, useT } from "../lib/i18n";
 import { problemText, sessionStateText } from "../lib/messages";
 import { bestCodec } from "../lib/codec";
@@ -358,7 +371,14 @@ export function ConnectView() {
           </button>
         </section>
 
-        <MyDevices onOpen={openDevice} disabled={busy || !online || mode === "lan"} />
+        {mode === "code" ? (
+          <MyDevices onOpen={openDevice} disabled={busy || !online} />
+        ) : (
+          <LanDevices
+            onOpen={(d) => void openSavedLanDevice(d, presetSettings(preset, codec))}
+            disabled={busy}
+          />
+        )}
       </div>
     </div>
   );
@@ -445,6 +465,144 @@ function MyDevices({ onOpen, disabled }: { onOpen: (d: SavedDevice) => void; dis
             }}
           />
         ))}
+      </div>
+      {shown.length === 0 && <p className="nt-empty muted small">{t("devices.noMatch")}</p>}
+    </section>
+  );
+}
+
+/** 局域网直连：连接过的电脑自动保存在这里（IP/端口明文、账号/密码遮罩），点一下就连 */
+function LanDevices({ onOpen, disabled }: { onOpen: (d: SavedLanDevice) => void; disabled: boolean }) {
+  const t = useT();
+  const devices = useStore((s) => s.lanDevices);
+  const saved = useStore((s) => s.lanDevicesSaved);
+  const [query, setQuery] = useState("");
+  const [editing, setEditing] = useState<string | null>(null);
+  const [removed, setRemoved] = useState<SavedLanDevice | null>(null);
+
+  useEffect(() => {
+    if (!removed) return;
+    const timer = window.setTimeout(() => setRemoved(null), 6000);
+    return () => clearTimeout(timer);
+  }, [removed]);
+
+  if (devices.length === 0 && !removed) {
+    return saved ? <p className="nt-empty muted small">{t("lanDevices.empty")}</p> : null;
+  }
+  const shown = devices.filter((d) => matchLanDevice(d, query));
+
+  return (
+    <section className="nt-devices">
+      <div className="section-title">
+        <span>
+          <IconMonitor size={14} />
+          {t("lanDevices.title")}
+          <span className="count">{devices.length}</span>
+        </span>
+        {devices.length >= 7 ? (
+          <label className="nt-search">
+            <IconSearch size={14} />
+            <input
+              value={query}
+              placeholder={t("lanDevices.search")}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Escape" && setQuery("")}
+            />
+          </label>
+        ) : (
+          <span className="small">{t(saved ? "lanDevices.hint" : "lanDevices.hintWeb")}</span>
+        )}
+      </div>
+
+      {removed && (
+        <div className="undo-bar" role="status">
+          <span>{t("lanDevices.removed", { name: lanTitle(removed) })}</span>
+          <button
+            className="text-btn"
+            onClick={() => {
+              restoreLanDevice(removed);
+              setRemoved(null);
+            }}
+          >
+            {t("devices.undo")}
+          </button>
+        </div>
+      )}
+
+      <div className="device-list">
+        {shown.map((d) => {
+          const title = lanTitle(d);
+          const off = disabled;
+          const finish = (value: string | null) => {
+            if (value !== null) renameLanDevice(d.id, value);
+            setEditing(null);
+          };
+          return (
+            <div
+              key={d.id}
+              role="button"
+              tabIndex={0}
+              className={`device-item ${off ? "disabled" : ""} ${editing === d.id ? "editing" : ""}`}
+              title={[d.name, d.os, lanAddr(d)].filter(Boolean).join(" · ")}
+              onClick={() => !off && editing !== d.id && onOpen(d)}
+              onKeyDown={(e) => e.key === "Enter" && !off && editing !== d.id && onOpen(d)}
+            >
+              <span className="avatar">{title.slice(0, 1).toUpperCase()}</span>
+              <span className="device-meta">
+                {editing === d.id ? (
+                  <input
+                    className="device-rename"
+                    autoFocus
+                    defaultValue={title}
+                    maxLength={60}
+                    onClick={(e) => e.stopPropagation()}
+                    onFocus={(e) => e.target.select()}
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                      if (e.key === "Enter") finish(e.currentTarget.value);
+                      else if (e.key === "Escape") finish(null);
+                    }}
+                    onBlur={(e) => finish(e.currentTarget.value)}
+                  />
+                ) : (
+                  <span className="device-name">{title}</span>
+                )}
+                <span className="device-sub">
+                  {lanAddr(d)}
+                  {` · ${t("lanDevices.account")} ${d.accountMasked}`}
+                  {` · ${t("lanDevices.password")} ${d.passwordMasked}`}
+                  {relativeTime(d.lastUsed, Date.now(), getLang() === "zh" ? "zh-CN" : "en") &&
+                    ` · ${relativeTime(d.lastUsed, Date.now(), getLang() === "zh" ? "zh-CN" : "en")}`}
+                </span>
+              </span>
+              {editing !== d.id && (
+                <span className="device-actions">
+                  <button
+                    className="icon-btn subtle"
+                    title={t("devices.rename")}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setEditing(d.id);
+                    }}
+                  >
+                    <IconPencil size={13} />
+                  </button>
+                  <button
+                    className="icon-btn subtle"
+                    title={t("devices.forget")}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      forgetLanDevice(d.id);
+                      setRemoved(d);
+                    }}
+                  >
+                    <IconClose size={13} />
+                  </button>
+                </span>
+              )}
+            </div>
+          );
+        })}
       </div>
       {shown.length === 0 && <p className="nt-empty muted small">{t("devices.noMatch")}</p>}
     </section>

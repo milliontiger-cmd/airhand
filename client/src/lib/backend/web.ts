@@ -3,7 +3,16 @@
 // 会话和桌面版一样走 WebSocket（console.ts），连的是同一个端口的 `/ws`。网页版自己的：
 // * 剪贴板在浏览器里同步（navigator.clipboard），规则与桌面版相同：只同步连接之后的变化，并抑制回声；
 // * 没有被控端模式、托盘和窗口；"我的设备"不保存。
-import type { AppInfo, Backend, Command, ConnectOptions, Problem, SessionEvent, SessionInfo } from "../api";
+import type {
+  AppInfo,
+  Backend,
+  Command,
+  ConnectOptions,
+  LanCredentials,
+  Problem,
+  SessionEvent,
+  SessionInfo,
+} from "../api";
 import { ConsoleLink, type MediaView } from "../console";
 import { getLang } from "../i18n";
 
@@ -240,6 +249,14 @@ class WebConsole extends ConsoleLink implements Backend {
     return null;
   }
   async saveDevices() {}
+  // 网页版同样不保存 LAN 电脑，也不把密码放在浏览器里
+  async loadLanDevices() {
+    return null;
+  }
+  async saveLanDevices() {}
+  async lanDeviceCredentials(): Promise<LanCredentials> {
+    throw new Error("the web console doesn't save LAN computers");
+  }
 
   // 网页版没有局域网直连设置（设置窗口只在桌面版托盘菜单里）
   async lanSettingsLoad() {
